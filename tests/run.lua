@@ -673,6 +673,18 @@ test("prepends prefix and appends suffix to the search query", function()
 	assert_contains(text, "NVMe 集群入门")
 end)
 
+test("reuses one search results tab", function()
+	local bp = setup_search("tavily")
+	state.search_output = SAMPLE
+	run(shinny, bp, nil)
+	local count = #state.panes
+	assert_true(state.panes[count].Buf:GetName() == "shinny: search results", "unexpected results name")
+
+	run(shinny, bp, nil)
+	assert_true(#state.panes == count, "second search created another results pane")
+	assert_contains(state.panes[count].Buf:text(), "NVMe 集群入门")
+end)
+
 test("shinny-prefix persists and changes later searches", function()
 	local bp = setup_search("tavily")
 	state.commands["shinny-prefix"](bp, { "请问" })

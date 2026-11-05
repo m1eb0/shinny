@@ -2,7 +2,7 @@
 
 一个 [micro](https://micro-editor.github.io) 插件：
 
-- **搜索**：选中文字按 `Alt-s`，用 Tavily 或 DeepSeek 搜索它，结果开在右侧分屏；查询会自动加上可配置的前缀/后缀（默认 `什么是`），前后缀每次都会显示出来。
+- **搜索**：选中文字按 `Alt-s`，用 Tavily 或 DeepSeek 搜索它；所有结果集中在一个固定的 `shinny: search results` tab 里，每次搜索更新它。查询会自动加上可配置的前缀/后缀（默认 `什么是`），前后缀每次都会显示出来。
 - **Chat**：在正在编辑的文件里按 `Alt-i`，打开这个文件专属的 LLM 对话分屏。它能看见所有打开的文件、光标位置、选中文本和最近的搜索结果，并且可以直接改写文件（`Ctrl-Z` 可撤销）。
 
 ```
@@ -154,7 +154,7 @@ micro 本身只做 Markdown 语法高亮，不渲染排版。编辑文件时按 
 
 ## 外观
 
-chat 分屏、输入栏、搜索结果和帮助页都带语法高亮（角色、分隔线、模型/思考状态、URL、修改提示），颜色取自当前 colorscheme，并自动启用 softwrap。
+chat 分屏、输入栏、搜索结果 tab 和帮助页都带语法高亮（角色、分隔线、模型/思考状态、URL、修改提示），颜色取自当前 colorscheme，并自动启用 softwrap。
 
 ## 实现说明
 
@@ -167,7 +167,7 @@ chat 分屏、输入栏、搜索结果和帮助页都带语法高亮（角色、
 ## 开发
 
 ```sh
-make test    # 27 个 headless 测试 + 2 个走本地 mock 的端到端测试
+make test    # 28 个 headless 测试 + 2 个走本地 mock 的端到端测试
 ```
 
 `tests/run.lua` 用假的 micro API 跑逻辑；`tests/integration.sh` 启动

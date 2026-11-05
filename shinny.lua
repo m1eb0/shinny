@@ -1,4 +1,4 @@
-VERSION = "0.6.2"
+VERSION = "0.6.3"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -861,16 +861,96 @@ local function render_search(ctx, data)
 	return table.concat(out, "\n")
 end
 
+local SEARCH_TAB_NAME = "shinny: search results"
+
+local function find_tab_with_buffer(name)
+	local tabs = micro.Tabs()
+	for i = 1, #tabs.List do
+		local tab = tabs.List[i]
+		local count = 1
+		pcall(function()
+			count = #tab.Panes
+		end)
+		for j = 1, count do
+			local pane = tab.Panes[j]
+			if pane ~= nil then
+				local bufname = ""
+				pcall(function()
+					bufname = tostr(pane.Buf:GetName())
+				end)
+				if bufname == name then
+					return tabs, i, pane.Buf
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function fill_results_buffer(buf, text)
+	local n = 0
+	pcall(function()
+		n = buf:LinesNum()
+	end)
+	if n > 0 then
+		local last = ""
+		pcall(function()
+			last = tostr(buf:Line(n - 1))
+		end)
+		pcall(function()
+			buf:Remove(buffer.Loc(0, 0), buffer.Loc(#last, n - 1))
+		end)
+	end
+	buf:Insert(buffer.Loc(0, 0), text)
+	pcall(function()
+		buf:SetName(SEARCH_TAB_NAME)
+	end)
+	set_filetype(buf, "shinnyresults", true)
+end
+
 local function show_results(ctx, text)
 	local bp = micro.CurPane()
 	if bp == nil then
 		micro.InfoBar():Error("shinny: no pane to show the results in")
 		return
 	end
-	local buf = buffer.NewBuffer(text, "")
-	buf:SetName("shinny: " .. shorten(ctx.full, 40))
-	set_filetype(buf, "shinnyresults", true)
-	bp:VSplitBuf(buf)
+
+	local tabs, idx, buf = find_tab_with_buffer(SEARCH_TAB_NAME)
+	if buf ~= nil then
+		fill_results_buffer(buf, text)
+		pcall(function()
+			tabs:SetActive(idx - 1)
+		end)
+		micro.InfoBar():Message("shinny: 搜索结果已更新")
+		return
+	end
+
+	local ok = pcall(function()
+		bp:AddTab()
+	end)
+	if ok then
+		tabs = micro.Tabs()
+		local tab = tabs.List[#tabs.List]
+		local pane = tab and tab.Panes[1]
+		if pane ~= nil and pane.Buf ~= nil then
+			fill_results_buffer(pane.Buf, text)
+			micro.InfoBar():Message("shinny: 搜索结果已打开")
+			return
+		end
+	end
+
+	-- fallback for older micro: reuse one split
+	local pane = find_pane_by_name(SEARCH_TAB_NAME)
+	if pane == nil then
+		local b = buffer.NewBuffer("", "")
+		b:SetName(SEARCH_TAB_NAME)
+		set_filetype(b, "shinnyresults", true)
+		pane = bp:VSplitBuf(b)
+	end
+	if pane ~= nil and pane.Buf ~= nil then
+		fill_results_buffer(pane.Buf, text)
+		micro.InfoBar():Message("shinny: 搜索结果已更新")
+	end
 end
 
 local function finish_search(ctx, output)
