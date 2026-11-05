@@ -1009,6 +1009,16 @@ test("chats from different files are isolated", function()
 	assert_true(not textB:find("question A", 1, true), "B leaked A")
 end)
 
+test("warns when the model output hits its limit", function()
+	local bp = setup_search("tavily")
+	state.chat_sse = 'data: {"choices":[{"delta":{"content":"partial answer"}}]}\n\n'
+		.. 'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n'
+		.. 'data: [DONE]\n\n'
+	run(shinny_chat, bp, nil)
+	ask("long answer")
+	assert_contains(transcript_pane().Buf:text(), "达到模型输出上限")
+end)
+
 test("chat persists the conversation to disk", function()
 	local bp = setup_search("tavily")
 	state.chat_sse = CHAT_TEXT

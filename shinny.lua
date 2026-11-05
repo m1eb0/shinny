@@ -1,4 +1,4 @@
-VERSION = "0.7.2"
+VERSION = "0.7.3"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -1871,7 +1871,7 @@ local handle_stream_chunk
 local handle_stream_exit
 local finalize_cancel
 
-local STREAM_CMD = 'curl -sS -N --max-time 180 -X POST "$SHINNY_ENDPOINT"'
+local STREAM_CMD = 'curl -sS -N --max-time 1800 -X POST "$SHINNY_ENDPOINT"'
 	.. ' -H "Content-Type: application/json"'
 	.. ' -H "Authorization: Bearer $SHINNY_KEY"'
 	.. ' --data-binary @"$SHINNY_BODY_FILE"'
@@ -1916,7 +1916,7 @@ function start_request(chat)
 		url = DEFAULT_DS_CHAT
 	end
 
-	chat.stream = { content = "", reasoning = "", tools = {}, usage = nil }
+	chat.stream = { content = "", reasoning = "", tools = {}, usage = nil, finished = false }
 	chat.streaming = true
 	chat.canceled = false
 	chat.timeout = false
@@ -1988,6 +1988,7 @@ function handle_stream_chunk(chat, chunk)
 			local payload = trim(line:sub(6))
 			if payload == "[DONE]" then
 				chat.stream.done = true
+				chat.stream.finished = true
 				if chat.job ~= nil then
 					pcall(shell.JobStop, chat.job)
 					chat.job = nil
@@ -2005,6 +2006,9 @@ function handle_stream_chunk(chat, chunk)
 					end
 					local choices = data.choices
 					if type(choices) == "table" and type(choices[1]) == "table" then
+						if type(choices[1].finish_reason) == "string" and choices[1].finish_reason ~= "" then
+							chat.stream.finish_reason = choices[1].finish_reason
+						end
 						local delta = choices[1].delta
 						if type(delta) == "table" then
 							if type(delta.reasoning_content) == "string" and delta.reasoning_content ~= "" then
@@ -2054,7 +2058,7 @@ local function watch_chats()
 	for _, chat in pairs(chats) do
 		if chat.streaming and chat.job ~= nil then
 			local last = chat.last_activity or TICK
-			if TICK - last >= 6 then
+			if TICK - last >= 12 then
 				chat.timeout = true
 				local job = chat.job
 				chat.job = nil
@@ -2195,6 +2199,15 @@ function handle_stream_exit(chat, output)
 	local display = content
 	if #notes > 0 then
 		display = (display ~= "" and display .. "\n\n" or "") .. "▸ 已应用到文件：" .. table.concat(notes, "；")
+	end
+	local warning = nil
+	if chat.stream.finish_reason == "length" then
+		warning = "达到模型输出上限，回答可能不完整"
+	elseif not chat.stream.finished then
+		warning = "连接中断，回答可能不完整"
+	end
+	if warning ~= nil then
+		display = (display ~= "" and display .. "\n\n" or "") .. "▸ " .. warning
 	end
 	chat.messages[#chat.messages + 1] = {
 		role = "assistant",
