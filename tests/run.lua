@@ -763,6 +763,13 @@ test("shift+enter inserts a newline in the chat input", function()
 	assert_true(#state.chat_bodies == 0, "newline must not send the message")
 end)
 
+test("alt-enter inserts an indented newline in a normal buffer", function()
+	local bp = new_pane(new_buffer("  hello\n", "/tmp/plain.txt"))
+	bp.Cursor.X, bp.Cursor.Y = 7, 0
+	state.commands["shinny-chat-newline"](bp, nil)
+	assert_contains(bp.Buf:text(), "  hello\n  ")
+end)
+
 test("split Escape then Enter also inserts a newline", function()
 	local bp = setup_search("tavily")
 	run(shinny_chat, bp, nil)

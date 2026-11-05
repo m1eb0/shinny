@@ -1,4 +1,4 @@
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -2710,15 +2710,28 @@ function shinny_chat_newline(bp, args)
 	if bp == nil then
 		return
 	end
-	local chat = chats_by_input[tostr(bp.Buf:GetName())]
-	if chat == nil then
+	local name = tostr(bp.Buf:GetName())
+	if name:sub(1, 1) == ">" then
+		return
+	end
+	if is_chat_name(name) then
+		return
+	end
+	if chats_by_input[name] ~= nil then
+		insert_input_newline(bp)
 		return
 	end
 	local cursor = bp.Cursor
-	local y = cursor.Y
-	bp.Buf:Insert(buffer.Loc(cursor.X, y), "\n")
+	local ok, line = pcall(function()
+		return bp.Buf:Line(cursor.Y)
+	end)
+	if not ok then
+		return
+	end
+	local indent = tostr(line):match("^%s*") or ""
 	pcall(function()
-		cursor:GotoLoc(buffer.Loc(0, y + 1))
+		bp.Buf:Insert(buffer.Loc(cursor.X, cursor.Y), "\n" .. indent)
+		cursor:GotoLoc(buffer.Loc(#indent, cursor.Y + 1))
 	end)
 end
 
