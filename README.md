@@ -92,6 +92,7 @@ Chat 的上下文包括：
 | `shinny-thinking [on\|off]` | 查看/切换思考模式 |
 | `shinny-effort [low\|high\|max]` | 查看/设置思考强度 |
 | `shinny-raw` | 查看上一次请求的原始响应 |
+| `shinny-help` | 显示命令、快捷键、选项和当前设置 |
 
 | 选项 | 默认值 |
 | --- | --- |
@@ -105,6 +106,10 @@ Chat 的上下文包括：
 | `shinny.chatcontext` | `24000` |
 | `shinny.endpoint` / `shinny.deepseektoolsurl` / `shinny.chaturl` | 官方地址 |
 
+## 外观
+
+chat 分屏、输入栏、搜索结果和帮助页都带语法高亮（角色、分隔线、模型/思考状态、URL、修改提示），颜色取自当前 colorscheme，并自动启用 softwrap。
+
 ## 实现说明
 
 - 搜索和 chat 都通过 `micro/shell.JobStart` 在后台跑 `curl`，micro 不会卡住；query 和请求体通过环境变量传递，选区文字不需要 shell 转义。
@@ -114,7 +119,7 @@ Chat 的上下文包括：
 ## 开发
 
 ```sh
-make test    # 10 个 headless 测试 + 2 个走本地 mock 的端到端测试
+make test    # 18 个 headless 测试 + 2 个走本地 mock 的端到端测试
 ```
 
 `tests/run.lua` 用假的 micro API 跑逻辑；`tests/integration.sh` 启动

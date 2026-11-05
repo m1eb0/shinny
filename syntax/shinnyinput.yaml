@@ -1,0 +1,7 @@
+filetype: shinnyinput
+
+detect:
+    filename: "\\.shinnyinput$"
+
+rules:
+    - statement: "^> "

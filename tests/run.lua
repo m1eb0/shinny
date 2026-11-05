@@ -117,6 +117,11 @@ function Buf:SetName(name)
 	self.name = name
 end
 
+function Buf:SetOption(name, value)
+	self.options = self.options or {}
+	self.options[name] = value
+end
+
 function Buf:text()
 	return table.concat(self.lines, "\n")
 end
@@ -732,6 +737,29 @@ test("shinny-effort validates and switches effort", function()
 	state.commands["shinny-effort"](bp, { "bogus" })
 	assert_true(state.options["shinny.effort"] == "max", "invalid effort changed the option")
 	assert_contains(last_message(), "low")
+end)
+
+test("shinny-help opens a help buffer", function()
+	local bp = setup_search("tavily")
+	run(state.commands["shinny-help"], bp, nil)
+	local text = state.panes[#state.panes].Buf:text()
+	assert_contains(text, "shinny 帮助")
+	assert_contains(text, "shinny-model")
+	assert_contains(text, "Alt-i")
+	assert_contains(text, "当前设置")
+end)
+
+test("chat buffers get their syntax filetypes", function()
+	local bp = setup_search("tavily")
+	state.chat_output = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
+	run(shinny_chat, bp, nil)
+
+	local transcript = transcript_pane().Buf
+	local input = input_pane().Buf
+	assert_true(transcript.options and transcript.options.filetype == "shinnychat", "transcript filetype")
+	assert_true(input.options and input.options.filetype == "shinnyinput", "input filetype")
+	assert_contains(transcript:text(), "› you")
+	assert_contains(transcript:text(), "deepseek-flash")
 end)
 
 test("tavily HTTP errors are surfaced", function()

@@ -84,6 +84,7 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny-thinking [on\|off]` | 查看/切换思考模式 |
 | `shinny-effort [low\|high\|max]` | 查看/设置思考强度 |
 | `shinny-raw` | 打开上一次请求的原始响应 |
+| `shinny-help` | 显示所有命令、快捷键、选项和当前设置 |
 
 ## 选项
 
@@ -103,6 +104,10 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny.thinking` | `true` | 是否开启思考模式 |
 | `shinny.effort` | `high` | 思考强度（low/high/max） |
 | `shinny.chatcontext` | `24000` | 发给 chat 的文件上下文字符预算 |
+
+## 外观
+
+chat 分屏、输入栏、搜索结果和帮助页都带语法高亮：角色标签、分隔线、模型/思考状态、URL、`▸ 已应用` 提示等使用当前 colorscheme 的颜色，并自动开启 softwrap。换 colorscheme 后颜色会跟着变。
 
 ## 排错
 

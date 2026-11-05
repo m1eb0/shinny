@@ -1,0 +1,18 @@
+filetype: shinnychat
+
+detect:
+    filename: "\\.shinnychat$"
+
+rules:
+    - comment: "^─+$"
+    - statement: "^ shinny chat$"
+    - identifier: "^ .+ · ([0-9]+ files?|1 file)$"
+    - comment: "^ [A-Za-z0-9._-]+ · (thinking|no thinking)$"
+    - preproc: "^› you$"
+    - type: "^› shinny$"
+    - special: "^  ▸ "
+    - comment: "^  正在思考"
+    - comment: "^ Enter "
+    - comment: "^ 在下方输入栏"
+    - comment: "^ 例："
+    - comment: "^     把选区"

@@ -1,0 +1,14 @@
+filetype: shinnyresults
+
+detect:
+    filename: "\\.shinnyresults$"
+
+rules:
+    - statement: "^shinny · "
+    - comment: "^(tavily|deepseek) · "
+    - comment: "^前缀「"
+    - comment: "^Answer$"
+    - identifier: "https?://[^[:space:]]+"
+    - comment: "^   site: "
+    - comment: "^   score: "
+    - comment: "^No results"

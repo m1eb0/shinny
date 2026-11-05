@@ -1,4 +1,4 @@
-VERSION = "0.2.2"
+VERSION = "0.3.0"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -622,6 +622,20 @@ local function buffer_text(buf)
 	return table.concat(lines, "\n")
 end
 
+local function set_filetype(buf, ft, softwrap)
+	if buf == nil then
+		return
+	end
+	pcall(function()
+		buf:SetOption("filetype", ft)
+	end)
+	if softwrap then
+		pcall(function()
+			buf:SetOption("softwrap", "true")
+		end)
+	end
+end
+
 local function open_buffers()
 	local list = {}
 	local seen = {}
@@ -855,6 +869,7 @@ local function show_results(ctx, text)
 	end
 	local buf = buffer.NewBuffer(text, "")
 	buf:SetName("shinny: " .. shorten(ctx.full, 40))
+	set_filetype(buf, "shinnyresults", true)
 	bp:VSplitBuf(buf)
 end
 
@@ -1154,8 +1169,10 @@ local function render_chat(chat)
 	local rule = string.rep("─", 30)
 
 	add(rule)
-	add(" shinny chat · " .. chat.label)
-	add(string.format(" %s · %s · %d files", settings.model, thinking_label, #open_buffers()))
+	add(" shinny chat")
+	local nfiles = #open_buffers()
+	add(" " .. chat.label .. " · " .. (nfiles == 1 and "1 file" or (nfiles .. " files")))
+	add(" " .. settings.model .. " · " .. thinking_label)
 	add(rule)
 	add("")
 
@@ -1326,7 +1343,7 @@ local function finish_chat(chat, output)
 	local cleaned, notes = apply_edits(chat, content)
 	local shown = cleaned
 	if #notes > 0 then
-		shown = (shown ~= "" and shown .. "\n\n" or "") .. "[已应用到文件] " .. table.concat(notes, "；")
+		shown = (shown ~= "" and shown .. "\n\n" or "") .. "▸ 已应用到文件：" .. table.concat(notes, "；")
 	end
 	append_message(chat, "assistant", shown)
 	micro.InfoBar():Message("shinny: 回复完成")
@@ -1450,6 +1467,8 @@ local function ensure_chat_panes(bp, chat)
 	if chat.buf == nil then
 		chat.buf = tpane.Buf
 	end
+	set_filetype(chat.buf, "shinnychat", true)
+	set_filetype(chat.ibuf, "shinnyinput", true)
 	set_chat_text(chat, render_chat(chat))
 	focus_input(chat)
 end
@@ -1530,6 +1549,84 @@ end
 -- ---------------------------------------------------------------------------
 -- commands
 -- ---------------------------------------------------------------------------
+
+local function render_help()
+	local settings = chat_settings()
+	local prefix = current_prefix()
+	local suffix = current_suffix()
+	local lines = {}
+	local function add(line)
+		lines[#lines + 1] = tostr(line)
+	end
+
+	add("# shinny 帮助")
+	add("")
+	add("## 快捷键")
+	add("")
+	add("- `Alt-s` — 搜索选区（等同 `> shinny`）")
+	add("- `Alt-i` — 打开 / 聚焦当前文件的 chat 输入栏")
+	add("")
+	add("## 搜索")
+	add("")
+	add("- 选中文字后按 `Alt-s`，实际查询 = 前缀 + 文字 + 后缀")
+	add("- 也可以 `> shinny <query>` 直接搜索")
+	add("- 搜索后端：`" .. current_backend() .. "`；用 `> shinny-backend tavily|deepseek` 切换")
+	add("")
+	add("## Chat")
+	add("")
+	add("- `Alt-i` 打开该文件专属的分屏：上方对话记录，下方 `>` 输入栏")
+	add("- 在输入栏输入问题，`Enter` 发送；再按 `Alt-i` 回到输入栏")
+	add("- Chat 能看到所有打开的文件、光标位置、选区和最近一次搜索结果")
+	add("- 回答里的修改会直接写入文件（`Ctrl-Z` 可撤销）")
+	add("")
+	add("## 命令")
+	add("")
+	add("- `shinny [query]` — 搜索选区或指定文字")
+	add("- `shinny-prefix [text]` — 查看/设置前缀（`-` 清除）")
+	add("- `shinny-suffix [text]` — 查看/设置后缀（`-` 清除）")
+	add("- `shinny-backend [tavily|deepseek]` — 查看/切换搜索后端")
+	add("- `shinny-chat` — 打开当前文件的 chat，等同 `Alt-i`")
+	add("- `shinny-model [name]` — 查看/切换模型")
+	add("- `shinny-thinking [on|off]` — 查看/切换思考模式")
+	add("- `shinny-effort [low|high|max]` — 查看/设置思考强度")
+	add("- `shinny-raw` — 打开上一次请求的原始响应")
+	add("- `shinny-help` — 显示这份帮助")
+	add("")
+	add("## 当前设置")
+	add("")
+	add("- 前缀：`" .. (prefix == "" and "无" or prefix) .. "`")
+	add("- 后缀：`" .. (suffix == "" and "无" or suffix) .. "`")
+	add("- 搜索后端：`" .. current_backend() .. "`")
+	add("- Chat 模型：`" .. settings.model .. "`")
+	add("- 思考模式：`" .. (settings.thinking and ("on · " .. settings.effort) or "off") .. "`")
+	add("- Tavily key：" .. (api_key("tavily") ~= "" and "已配置" or "未配置"))
+	add("- DeepSeek key：" .. (api_key("deepseek") ~= "" and "已配置" or "未配置"))
+	add("- 结果数量：`" .. tostr(math.floor(option_number("maxresults", 5))) .. "`")
+	add("")
+	add("## 常用选项")
+	add("")
+	add("`shinny.prefix`、`shinny.suffix`、`shinny.backend`、`shinny.apikey`、")
+	add("`shinny.deepseekkey`、`shinny.chatmodel`、`shinny.thinking`、`shinny.effort`、")
+	add("`shinny.maxresults`、`shinny.chatcontext`")
+	add("")
+	add("完整文档：`> help shinny`")
+	return table.concat(lines, "\n") .. "\n"
+end
+
+function shinny_help(bp, args)
+	local pane = micro.CurPane()
+	if pane == nil then
+		pane = bp
+	end
+	if pane == nil then
+		micro.InfoBar():Error("shinny: 没有可以显示帮助的窗格")
+		return
+	end
+	local buf = buffer.NewBuffer(render_help(), "")
+	buf:SetName("shinny help")
+	set_filetype(buf, "markdown", true)
+	pane:VSplitBuf(buf)
+end
 
 function shinny(bp, args)
 	local query = trim(join_args(args))
@@ -1704,10 +1801,14 @@ function init()
 	config.MakeCommand("shinny-suffix", shinny_suffix, config.NoComplete)
 	config.MakeCommand("shinny-backend", shinny_backend, config.NoComplete)
 	config.MakeCommand("shinny-chat", shinny_chat, config.NoComplete)
+	config.MakeCommand("shinny-help", shinny_help, config.NoComplete)
 	config.MakeCommand("shinny-model", shinny_model, config.NoComplete)
 	config.MakeCommand("shinny-thinking", shinny_thinking, config.NoComplete)
 	config.MakeCommand("shinny-effort", shinny_effort, config.NoComplete)
 	config.AddRuntimeFile("shinny", config.RTHelp, "help/shinny.md")
+	config.AddRuntimeFile("shinny", config.RTSyntax, "syntax/shinnychat.yaml")
+	config.AddRuntimeFile("shinny", config.RTSyntax, "syntax/shinnyinput.yaml")
+	config.AddRuntimeFile("shinny", config.RTSyntax, "syntax/shinnyresults.yaml")
 
 	config.TryBindKey("Alt-i", "command:shinny-chat", false)
 end
