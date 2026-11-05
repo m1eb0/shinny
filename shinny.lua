@@ -1,4 +1,4 @@
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -2178,6 +2178,18 @@ local function ensure_chat_panes(bp, chat)
 	focus_input(chat)
 end
 
+local function insert_input_newline(bp)
+	if bp == nil then
+		return
+	end
+	local cursor = bp.Cursor
+	local y = cursor.Y
+	bp.Buf:Insert(buffer.Loc(cursor.X, y), "\n")
+	pcall(function()
+		cursor:GotoLoc(buffer.Loc(0, y + 1))
+	end)
+end
+
 function preInsertNewline(bp)
 	if bp == nil then
 		return true
@@ -2185,6 +2197,11 @@ function preInsertNewline(bp)
 	local chat = chats_by_input[tostr(bp.Buf:GetName())]
 	if chat == nil then
 		return true
+	end
+	if chat.esc_pending then
+		chat.esc_pending = false
+		insert_input_newline(bp)
+		return false
 	end
 	if chat.streaming then
 		micro.InfoBar():Error("shinny: 上一个问题还在处理中")
@@ -2220,6 +2237,12 @@ function preEscape(bp)
 			end
 		end)
 		return false
+	end
+	if chat ~= nil and chats_by_input[name] ~= nil then
+		chat.esc_pending = true
+		micro.After(300000000, function()
+			chat.esc_pending = false
+		end)
 	end
 	return true
 end

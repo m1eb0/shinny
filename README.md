@@ -76,7 +76,7 @@ micro 2.0.15 的 tcell 还无法解码 Ghostty 默认发送的 `CSI 27;2;13~`：
 - `Shift+Enter` 在当前光标处换行
 - 普通编辑区里 `Shift+Enter` 仍是换行
 
-其他终端也可以把 `Shift+Enter` 映射为 `ESC` + `CR`；对应地，插件的 `shinny-chat-newline` 命令也可以手动绑定。
+其他终端也可以把 `Shift+Enter` 映射为 `ESC` + `CR`；对应地，插件的 `shinny-chat-newline` 命令也可以手动绑定。插件同时兼容 `ESC` 与 `CR` 被拆成两次按键事件的情况（300ms 内视为一次 `Shift+Enter`）。
 
 Chat 的上下文包括：
 
@@ -158,7 +158,7 @@ chat 分屏、输入栏、搜索结果和帮助页都带语法高亮（角色、
 ## 开发
 
 ```sh
-make test    # 24 个 headless 测试 + 2 个走本地 mock 的端到端测试
+make test    # 25 个 headless 测试 + 2 个走本地 mock 的端到端测试
 ```
 
 `tests/run.lua` 用假的 micro API 跑逻辑；`tests/integration.sh` 启动
