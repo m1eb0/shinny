@@ -18,7 +18,7 @@
 需要 micro ≥ 2.0、`curl`，以及 Tavily（和/或 DeepSeek）的 API key。
 
 ```sh
-git clone https://github.com/miebo/shinny
+git clone https://github.com/m1eb0/shinny
 cd shinny
 make link          # 软链到 ~/.config/micro/plug/shinny
 ```
