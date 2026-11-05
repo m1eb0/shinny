@@ -94,7 +94,7 @@ Chat 是流式的：回答边生成边显示，`Esc` 停止；思考内容单独
 
 ### Markdown 预览
 
-micro 本身只做 Markdown 语法高亮，不渲染排版。编辑文件时按 **`Alt-r`**（或 `> shinny-preview`）会把当前 buffer（含未保存修改）渲染到右侧只读分屏；再按一次刷新。在 chat 里按 `Alt-r` 则渲染最后一条 assistant 回答。
+micro 本身只做 Markdown 语法高亮，不渲染排版。编辑文件时按 **`Alt-r`**（或 `> shinny-preview`）会在**新 tab** 里打开当前 buffer（含未保存修改）的渲染预览；再按一次刷新。在 chat 里按 `Alt-r` 则渲染最后一条 assistant 回答。
 
 渲染用 `python3 -m rich.markdown`，写到 `shinny/preview.md`；没有 `rich` 时显示原文。
 
@@ -128,7 +128,7 @@ micro 本身只做 Markdown 语法高亮，不渲染排版。编辑文件时按 
 | `shinny-help` | 显示命令、快捷键、选项和当前设置 |
 | `shinny-chat-new` | 清空当前文件的会话 |
 | `shinny-usage` | 显示 token / cache 用量 |
-| `shinny-preview` | 渲染当前 Markdown 或最后一条回答（`Alt-r`） |
+| `shinny-preview` | 在新 tab 渲染当前 Markdown 或最后一条回答（`Alt-r`） |
 | `shinny-chat-stop` | 停止生成（同 `Esc`） |
 | `shinny-chat-newline` | 输入栏换行（`Alt-Enter`） |
 | `shinny-image [path]` | 附加图片到下一问；不带参数读剪贴板 |

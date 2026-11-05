@@ -1,4 +1,4 @@
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -2373,7 +2373,7 @@ local function render_help()
 	add("- `Alt-s` — 搜索选区（等同 `> shinny`）")
 	add("- `Alt-i` — 打开 / 聚焦当前文件的 chat 输入栏")
 	add("- `Esc` — 生成过程中停止")
-	add("- `Alt-r` — 打开 / 刷新当前 Markdown 的渲染预览")
+	add("- `Alt-r` — 在新 tab 打开 / 刷新当前 Markdown 的渲染预览")
 	add("- `Shift+Enter` — 输入栏内换行（终端需映射为 Alt-Enter，见 README）")
 	add("")
 	add("## 搜索")
@@ -2805,19 +2805,31 @@ local function render_markdown(path)
 	return text
 end
 
-local function show_preview(bp, label, rendered)
-	local name = PREVIEW_PREFIX .. label
-	local pane = find_pane_by_name(name)
-	if pane == nil then
-		local buf = buffer.NewBuffer("", "")
-		buf:SetName(name)
-		pane = bp:VSplitIndex(buf, true)
+local function find_preview_tab()
+	local tabs = micro.Tabs()
+	for i = 1, #tabs.List do
+		local tab = tabs.List[i]
+		local count = 1
+		pcall(function()
+			count = #tab.Panes
+		end)
+		for j = 1, count do
+			local pane = tab.Panes[j]
+			if pane ~= nil then
+				local name = ""
+				pcall(function()
+					name = tostr(pane.Buf:GetName())
+				end)
+				if name:sub(1, #PREVIEW_PREFIX) == PREVIEW_PREFIX then
+					return tabs, i, pane.Buf
+				end
+			end
+		end
 	end
-	if pane == nil or pane.Buf == nil then
-		micro.InfoBar():Error("shinny: 无法创建预览分屏")
-		return
-	end
-	local buf = pane.Buf
+	return nil
+end
+
+local function set_preview_buffer(buf, name, rendered)
 	pcall(function()
 		buf:SetOption("readonly", false)
 	end)
@@ -2828,11 +2840,52 @@ local function show_preview(bp, label, rendered)
 		end)
 	end
 	buf:Insert(buffer.Loc(0, 0), rendered)
+	pcall(function()
+		buf:SetName(name)
+	end)
 	set_filetype(buf, "markdown", true)
 	pcall(function()
 		buf:SetOption("readonly", true)
 	end)
-	micro.InfoBar():Message("shinny: 预览已更新")
+end
+
+local function show_preview(bp, label, rendered)
+	local name = PREVIEW_PREFIX .. label
+	local tabs, idx, buf = find_preview_tab()
+	if buf ~= nil then
+		set_preview_buffer(buf, name, rendered)
+		pcall(function()
+			tabs:SetActive(idx - 1)
+		end)
+		micro.InfoBar():Message("shinny: 预览已更新")
+		return
+	end
+
+	local ok = pcall(function()
+		bp:AddTab()
+	end)
+	if ok then
+		tabs = micro.Tabs()
+		local tab = tabs.List[#tabs.List]
+		local pane = tab and tab.Panes[1]
+		if pane ~= nil and pane.Buf ~= nil then
+			set_preview_buffer(pane.Buf, name, rendered)
+			micro.InfoBar():Message("shinny: 预览已打开")
+			return
+		end
+	end
+
+	-- fallback: split (older micro without AddTab)
+	local pane = find_pane_by_name(name)
+	if pane == nil then
+		local b = buffer.NewBuffer("", "")
+		b:SetName(name)
+		pane = bp:VSplitIndex(b, true)
+	end
+	if pane ~= nil and pane.Buf ~= nil then
+		set_preview_buffer(pane.Buf, name, rendered)
+		micro.InfoBar():Message("shinny: 预览已更新")
+	end
 end
 
 function shinny_preview(bp, args)

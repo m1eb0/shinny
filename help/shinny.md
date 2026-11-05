@@ -58,7 +58,7 @@ Chat 的行为：
 
 ### Markdown 预览
 
-编辑文件时按 **`Alt-r`**（等同于 `> shinny-preview`）会把当前 buffer（含未保存修改）写到临时 `.md`，用 `python3 -m rich.markdown` 渲染到右侧只读分屏；再按一次刷新。在 chat 里按 `Alt-r` 则渲染最后一条 assistant 回答。没有 `rich` 时退回显示 Markdown 原文。
+编辑文件时按 **`Alt-r`**（等同于 `> shinny-preview`）会把当前 buffer（含未保存修改）写到临时 `.md`，用 `python3 -m rich.markdown` 渲染到**新 tab**；再按一次刷新。用 `Alt-,` / `Alt-.` 切换回源文件 tab。在 chat 里按 `Alt-r` 则渲染最后一条 assistant 回答。没有 `rich` 时退回显示 Markdown 原文。
 
 也可以直接用 micro 的终端分屏：`> vsplit` 后在空白 pane 里 `> term python3 -m rich.markdown 文件.md`。
 
@@ -109,7 +109,7 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny-help` | 显示所有命令、快捷键、选项和当前设置 |
 | `shinny-chat-new` | 清空当前文件的会话 |
 | `shinny-usage` | 显示本次会话的 token / cache 用量 |
-| `shinny-preview` | 渲染当前 Markdown（或最后一条回答）到只读分屏（`Alt-r`） |
+| `shinny-preview` | 在新 tab 渲染当前 Markdown（或最后一条回答）（`Alt-r`） |
 | `shinny-chat-stop` | 停止正在生成的回复（同 `Esc`） |
 | `shinny-chat-newline` | 在输入栏插入换行（`Alt-Enter` 绑定） |
 | `shinny-image [path]` | 附加图片到下一问；不带参数读剪贴板 |
