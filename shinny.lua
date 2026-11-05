@@ -1,4 +1,4 @@
-VERSION = "0.5.5"
+VERSION = "0.6.0"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -2391,6 +2391,7 @@ local function render_help()
 	add("- 模型通过 function calling 直接修改文件（`Ctrl-Z` 可撤销）")
 	add("- 会话按文件保存到 `~/.config/micro/shinny/chats`，重启可恢复")
 	add("- 底部会显示 token 用量和 cache 命中率")
+	add("- `> shinny-preview` 用 `rich` 渲染当前 buffer 或最后一条回答（只读分屏）")
 	add("- 支持图片输入（PNG / JPEG / GIF / WebP）：`> shinny-image ~/shot.png`，或直接 `> shinny-image` 读剪贴板；图片随下一条消息发送")
 	add("")
 	add("## 命令")
@@ -2405,6 +2406,7 @@ local function render_help()
 	add("- `shinny-effort [low|high|max]` — 查看/设置思考强度")
 	add("- `shinny-chat-new` — 清空当前文件的会话")
 	add("- `shinny-usage` — 显示 token / cache 用量")
+	add("- `shinny-preview` — 把当前 Markdown 或最后一条回答渲染到只读分屏")
 	add("- `shinny-chat-stop` — 停止正在生成的回复")
 	add("- `shinny-image [path]` — 附加图片到下一问（不带参数读剪贴板）")
 	add("- `shinny-image-url <url>` — 附加公网图片 URL")
@@ -2778,6 +2780,126 @@ function shinny_chat_newline(bp, args)
 	end)
 end
 
+local PREVIEW_PREFIX = "shinny preview · "
+
+local function read_text_file(path)
+	local ok, data = pcall(ioutil.ReadFile, path)
+	if not ok or data == nil then
+		return nil
+	end
+	local text = ""
+	pcall(function()
+		text = fmt.Sprintf("%s", data)
+	end)
+	return tostr(text)
+end
+
+local function render_markdown(path)
+	local ok, out = pcall(shell.ExecCommand, "python3", "-m", "rich.markdown", path)
+	if not ok or out == nil or tostr(out) == "" then
+		return nil
+	end
+	local text = tostr(out)
+	text = text:gsub("\27%[[%d;]*m", "")
+	return text
+end
+
+local function show_preview(bp, label, rendered)
+	local name = PREVIEW_PREFIX .. label
+	local pane = find_pane_by_name(name)
+	if pane == nil then
+		local buf = buffer.NewBuffer("", "")
+		buf:SetName(name)
+		pane = bp:VSplitIndex(buf, true)
+	end
+	if pane == nil or pane.Buf == nil then
+		micro.InfoBar():Error("shinny: 无法创建预览分屏")
+		return
+	end
+	local buf = pane.Buf
+	pcall(function()
+		buf:SetOption("readonly", false)
+	end)
+	local old = buffer_text(buf)
+	if #old > 0 then
+		pcall(function()
+			buf:Remove(buffer.Loc(0, 0), buffer_end_loc(buf))
+		end)
+	end
+	buf:Insert(buffer.Loc(0, 0), rendered)
+	set_filetype(buf, "markdown", true)
+	pcall(function()
+		buf:SetOption("readonly", true)
+	end)
+	micro.InfoBar():Message("shinny: 预览已更新")
+end
+
+function shinny_preview(bp, args)
+	if bp == nil then
+		micro.InfoBar():Error("shinny: 没有活动窗格")
+		return
+	end
+
+	local name = tostr(bp.Buf:GetName())
+	local text = nil
+	local label = nil
+	local chat = chats[name] or chats_by_input[name]
+	if chat ~= nil and (is_chat_name(name) or is_input_name(name)) then
+		for i = #chat.messages, 1, -1 do
+			local m = chat.messages[i]
+			if m.role == "assistant" then
+				text = m.display or m.content or ""
+				label = "chat answer"
+				break
+			end
+		end
+		if text == nil or text == "" then
+			micro.InfoBar():Error("shinny: 还没有回答可预览")
+			return
+		end
+	else
+		local arg = trim(join_args(args))
+		if arg ~= "" then
+			if arg:sub(1, 2) == "~/" then
+				arg = tostr(os.Getenv("HOME")) .. arg:sub(2)
+			end
+			text = read_text_file(arg)
+			if text == nil then
+				micro.InfoBar():Error("shinny: 读不到文件 " .. arg)
+				return
+			end
+			label = basename(arg)
+		else
+			text = buffer_text(bp.Buf)
+			label = chat_label(name)
+		end
+		if text == "" then
+			micro.InfoBar():Error("shinny: 当前 buffer 是空的")
+			return
+		end
+	end
+
+	local dir = config.ConfigDir .. "/shinny"
+	pcall(os.MkdirAll, dir, 448)
+	local path = dir .. "/preview.md"
+	local ok = pcall(ioutil.WriteFile, path, text, 384)
+	if not ok then
+		micro.InfoBar():Error("shinny: 无法写入预览临时文件")
+		return
+	end
+
+	local rendered = render_markdown(path)
+	if rendered == nil or rendered == "" then
+		rendered = text
+		micro.InfoBar():Message("shinny: rich 不可用，显示 Markdown 原文")
+	end
+	local target = bp
+	if chat ~= nil then
+		target = chat.src_pane or chat.pane or bp
+	end
+	show_preview(target, label, rendered)
+end
+
 function shinny_chat(bp, args)
 	if bp == nil then
 		micro.InfoBar():Error("shinny: 没有活动窗格")
@@ -2849,6 +2971,7 @@ function init()
 	config.MakeCommand("shinny-image-clear", shinny_image_clear, config.NoComplete)
 	config.MakeCommand("shinny-image-detail", shinny_image_detail, config.NoComplete)
 	config.MakeCommand("shinny-chat-newline", shinny_chat_newline, config.NoComplete)
+	config.MakeCommand("shinny-preview", shinny_preview, config.NoComplete)
 	config.MakeCommand("shinny-model", shinny_model, config.NoComplete)
 	config.MakeCommand("shinny-thinking", shinny_thinking, config.NoComplete)
 	config.MakeCommand("shinny-effort", shinny_effort, config.NoComplete)

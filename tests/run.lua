@@ -25,6 +25,7 @@ local state = {
 	chat_sse = "",
 	chat_queue = {},
 	chat_bodies = {},
+	exec_output = nil,
 	afters = {},
 	mkdirs = {},
 	real = integration ~= nil,
@@ -378,6 +379,13 @@ packages["micro/shell"] = function()
 			return {}
 		end,
 		JobStop = function() end,
+		ExecCommand = function(name, ...)
+			state.last_exec = { name = name, args = { ... } }
+			if state.exec_output ~= nil then
+				return state.exec_output, nil
+			end
+			return "", "not found"
+		end,
 	}
 end
 
@@ -878,6 +886,17 @@ test("shinny-effort validates and switches effort", function()
 	state.commands["shinny-effort"](bp, { "bogus" })
 	assert_true(state.options["shinny.effort"] == "max", "invalid effort changed the option")
 	assert_contains(last_message(), "low")
+end)
+
+test("shinny-preview renders markdown in a split", function()
+	local bp = new_pane(new_buffer("# Hi\n\nbody\n", "/tmp/doc.md"))
+	state.exec_output = "  Hi\n\nbody\n"
+	state.commands["shinny-preview"](bp, nil)
+
+	assert_true(state.files["/tmp/shinny-test-cfg/shinny/preview.md"] ~= nil, "preview source not written")
+	local pane = state.panes[#state.panes]
+	assert_contains(pane.Buf:text(), "Hi")
+	assert_true(pane.Buf.options.filetype == "markdown", "preview filetype")
 end)
 
 test("shinny-help opens a help buffer", function()

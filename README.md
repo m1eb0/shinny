@@ -92,6 +92,12 @@ Chat 是流式的：回答边生成边显示，`Esc` 停止；思考内容单独
 
 会话按文件持久化在 `~/.config/micro/shinny/chats/`，重启 micro 能恢复；顶部显示 token 用量和 cache 命中率，`> shinny-usage` 查看累计值，`> shinny-chat-new` 清空会话。上下文按 `shinny.chattokenbudget`（token 估算）裁剪；system prompt 固定、易变上下文注入最新一条 user 消息，以尽量命中 DeepSeek 的前缀缓存。
 
+### Markdown 预览
+
+micro 本身只做 Markdown 语法高亮，不渲染排版。`> shinny-preview` 把当前 buffer（含未保存修改）或最后一条 chat 回答写到 `shinny/preview.md`，用 `python3 -m rich.markdown` 渲染到只读分屏；再执行一次刷新。没有 `rich` 时显示原文。
+
+也可以手动开终端分屏：`> vsplit`，在新 pane 里 `> term python3 -m rich.markdown 文件.md`。
+
 ### 图片
 
 `deepseek-flash` 支持图片。附到下一问的图片用 OpenAI 兼容的 `image_url` block 发送（文件转 base64 data URL）：
@@ -120,6 +126,7 @@ Chat 是流式的：回答边生成边显示，`Esc` 停止；思考内容单独
 | `shinny-help` | 显示命令、快捷键、选项和当前设置 |
 | `shinny-chat-new` | 清空当前文件的会话 |
 | `shinny-usage` | 显示 token / cache 用量 |
+| `shinny-preview` | 渲染当前 Markdown 或最后一条回答 |
 | `shinny-chat-stop` | 停止生成（同 `Esc`） |
 | `shinny-chat-newline` | 输入栏换行（`Alt-Enter`） |
 | `shinny-image [path]` | 附加图片到下一问；不带参数读剪贴板 |
@@ -158,7 +165,7 @@ chat 分屏、输入栏、搜索结果和帮助页都带语法高亮（角色、
 ## 开发
 
 ```sh
-make test    # 26 个 headless 测试 + 2 个走本地 mock 的端到端测试
+make test    # 27 个 headless 测试 + 2 个走本地 mock 的端到端测试
 ```
 
 `tests/run.lua` 用假的 micro API 跑逻辑；`tests/integration.sh` 启动

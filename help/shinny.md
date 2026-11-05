@@ -56,6 +56,12 @@ Chat 的行为：
 * **用量可见**：顶部显示 token 用量与 cache 命中率；`> shinny-usage` 查看累计值；`> shinny-chat-new` 清空会话
 * 上下文按 token 预算裁剪（`shinny.chattokenbudget`），system prompt 固定、易变上下文放在最新一条消息里，尽量提高前缀缓存命中
 
+### Markdown 预览
+
+`> shinny-preview` 会把当前 buffer（含未保存修改）或 chat 里最后一条 assistant 回答写到临时 `.md`，用 `python3 -m rich.markdown` 渲染到右侧只读分屏；再执行一次即可刷新。没有 `rich` 时退回显示 Markdown 原文。
+
+也可以直接用 micro 的终端分屏：`> vsplit` 后在空白 pane 里 `> term python3 -m rich.markdown 文件.md`。
+
 ### 图片输入
 
 `deepseek-flash` 支持图片。图片会随**下一条** user 消息发送（每张约 1024 tokens，按尺寸计费）：
@@ -103,6 +109,7 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny-help` | 显示所有命令、快捷键、选项和当前设置 |
 | `shinny-chat-new` | 清空当前文件的会话 |
 | `shinny-usage` | 显示本次会话的 token / cache 用量 |
+| `shinny-preview` | 渲染当前 Markdown（或最后一条回答）到只读分屏 |
 | `shinny-chat-stop` | 停止正在生成的回复（同 `Esc`） |
 | `shinny-chat-newline` | 在输入栏插入换行（`Alt-Enter` 绑定） |
 | `shinny-image [path]` | 附加图片到下一问；不带参数读剪贴板 |
