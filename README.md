@@ -61,7 +61,7 @@ DeepSeek 搜索走官方 `POST /v1/tools/search`，需要 DeepSeek key；两个�
 
 ### Chat
 
-在文件里按 `Alt-i`，会打开 `shinny chat · <文件名>` 分屏并弹出 `ask>` 输入框。回车发送；再按 `Alt-i` 继续追问。
+在文件里按 `Alt-i`：右侧出现这个文件专属的聊天分屏——上方是对话记录，下方是输入栏（`>`）。直接输入问题，Enter 发送；再按 `Alt-i` 把焦点带回输入栏。
 
 Chat 的上下文包括：
 

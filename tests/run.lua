@@ -186,6 +186,20 @@ local function new_pane(buf)
 		state.split_count = state.split_count + 1
 		return p
 	end
+	function pane:VSplitIndex(b, right)
+		local p = new_pane(b)
+		state.split_count = state.split_count + 1
+		return p
+	end
+	function pane:HSplitIndex(b, bottom)
+		local p = new_pane(b)
+		state.split_count = state.split_count + 1
+		return p
+	end
+	function pane:ResizePane(size) end
+	function pane:Tab()
+		return { H = 40 }
+	end
 	function pane:GotoLoc(loc) end
 	state.panes[#state.panes + 1] = pane
 	return pane
@@ -566,44 +580,74 @@ test("rejects an unknown backend", function()
 	assert_contains(last_message(), "tavily")
 end)
 
-test("chat applies a selection rewrite from the model", function()
+local function input_pane()
+	return state.panes[#state.panes]
+end
+
+local function transcript_pane()
+	return state.panes[#state.panes - 1]
+end
+
+local function set_input(text)
+	local pane = input_pane()
+	pane.Buf.lines = { "> " .. text }
+	pane.Buf.cursor.X, pane.Buf.cursor.Y = #("> " .. text), 0
+	return pane
+end
+
+local function ask(text)
+	local pane = set_input(text)
+	preInsertNewline(pane)
+	flush()
+end
+
+test("chat opens a TUI split with a transcript and an input pane", function()
+	local bp = setup_search("tavily")
+	run(shinny_chat, bp, nil)
+
+	assert_true(state.split_count == 2, "expected transcript + input splits")
+	local input = input_pane()
+	assert_contains(input.Buf:GetName(), "shinny chat input")
+	assert_contains(input.Buf:text(), "> ")
+	assert_contains(transcript_pane().Buf:text(), "shinny chat")
+	assert_true(preInsertNewline(bp) == true, "Enter outside the input must pass through")
+end)
+
+test("Enter in the input pane sends the question and applies a rewrite", function()
 	local bp = setup_search("tavily")
 	state.chat_output = CHAT_EDIT
-
 	run(shinny_chat, bp, nil)
-	assert_true(#state.prompts == 1, "expected a prompt")
-	assert_true(state.split_count == 1, "expected a chat split")
+	assert_true(preInsertNewline(input_pane()) == false, "Enter should be consumed in the input")
+	assert_contains(last_message(), "输入问题")
 
-	state.prompts[1].done("把选区改写成更专业的语言", false)
-	flush()
+	ask("把选区改写成更专业的语言")
 
 	assert_true(bp.Buf:text():find("重写后的专业表述。", 1, true) ~= nil, "selection not rewritten")
 	assert_contains(state.job_env.BODY, "把选区改写成更专业的语言")
 	assert_contains(state.job_env.BODY, "当前文件")
 	assert_contains(state.job_env.BODY, "NVME集群")
 
-	local chat_text = state.panes[#state.panes].Buf:text()
+	local chat_text = transcript_pane().Buf:text()
+	assert_contains(chat_text, "› you")
+	assert_contains(chat_text, "› shinny")
 	assert_contains(chat_text, "已应用到文件")
 	assert_contains(chat_text, "已替换选区")
+	assert_contains(input_pane().Buf:text(), "> ")
 end)
 
 test("chat applies cursor insert and line replacement", function()
 	local bp = setup_search("tavily")
 	bp.Cursor.sel = { { X = 0, Y = 0 }, { X = 0, Y = 0 } }
 	bp.Cursor.X, bp.Cursor.Y = 2, 0
-
-	state.chat_output = '{"choices":[{"message":{"content":"<<<SHINNY_EDIT cursor>>>\\n插入的内容\\n<<<SHINNY_EDIT_END>>>"}}]}\n__SHINNY_STATUS__:200'
 	run(shinny_chat, bp, nil)
-	state.prompts[1].done("在光标处插入解释", false)
-	flush()
+
+	state.chat_output = '{"choices":[{"message":{"content":"<<<SHINNY_EDIT cursor>>>\n插入的内容\n<<<SHINNY_EDIT_END>>>"}}]}\n__SHINNY_STATUS__:200'
+	ask("在光标处插入解释")
 	assert_contains(bp.Buf:text(), "NV插入的内容ME集群")
 
 	bp.Cursor.X, bp.Cursor.Y = 0, 1
-	state.prompts = {}
-	state.chat_output = '{"choices":[{"message":{"content":"<<<SHINNY_EDIT line>>>\\nThis line has been translated.\\n<<<SHINNY_EDIT_END>>>"}}]}\n__SHINNY_STATUS__:200'
-	run(shinny_chat, bp, nil)
-	state.prompts[1].done("把这行改成英文", false)
-	flush()
+	state.chat_output = '{"choices":[{"message":{"content":"<<<SHINNY_EDIT line>>>\nThis line has been translated.\n<<<SHINNY_EDIT_END>>>"}}]}\n__SHINNY_STATUS__:200'
+	ask("把这行改成英文")
 	assert_contains(bp.Buf:text(), "This line has been translated.")
 end)
 
@@ -612,23 +656,28 @@ test("chat sees other open files", function()
 	local other = new_buffer("OTHER FILE CONTENT\n", "/tmp/other.md")
 	new_pane(other)
 	state.chat_output = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
-
 	run(shinny_chat, bp, nil)
-	state.prompts[1].done("看看别的文件", false)
-	flush()
+	ask("看看别的文件")
 
 	assert_contains(state.job_env.BODY, "OTHER FILE CONTENT")
 	assert_contains(state.job_env.BODY, "打开的文件")
 end)
 
-test("chat reports a missing DeepSeek key after asking", function()
+test("chat keeps the question when no DeepSeek key is configured", function()
 	local bp = setup_search("tavily")
 	state.options["shinny.deepseekkey"] = ""
 	run(shinny_chat, bp, nil)
-	assert_true(#state.prompts == 1, "prompt should open")
-	state.prompts[1].done("你好", false)
-	flush()
+	ask("你好")
 	assert_contains(last_message(), "DeepSeek key")
+	assert_contains(input_pane().Buf:text(), "> 你好")
+end)
+
+test("Alt-i focuses the input pane on an existing chat", function()
+	local bp = setup_search("tavily")
+	run(shinny_chat, bp, nil)
+	local before = #state.panes
+	run(shinny_chat, bp, nil)
+	assert_true(#state.panes == before, "Alt-i must not create another chat")
 end)
 
 test("tavily HTTP errors are surfaced", function()
@@ -659,8 +708,7 @@ if integration then
 		state.real = true
 		bp.Cursor.sel = { { X = 0, Y = 0 }, { X = 10, Y = 0 } }
 		run(shinny_chat, bp, nil)
-		state.prompts[1].done("把选区改写成更专业的语言", false)
-		flush()
+		ask("把选区改写成更专业的语言")
 		assert_contains(bp.Buf:text(), "重写后的专业表述。")
 	end)
 end

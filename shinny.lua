@@ -1,4 +1,4 @@
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -24,6 +24,8 @@ local MAX_DS_QUERY_CHARS = 128
 local MAX_SNIPPET_BYTES = 480
 local STATUS_MARKER = "__SHINNY_STATUS__"
 local CHAT_PREFIX = "shinny chat · "
+local CHAT_INPUT_PREFIX = "shinny chat input · "
+local INPUT_PROMPT = "> "
 local STATE_PATH = config.ConfigDir .. "/shinny.json"
 
 -- `shinny-prefix`, `shinny-suffix` and `shinny-backend` persist here.
@@ -43,6 +45,7 @@ local last_search_query = ""
 
 -- Per-file chat state, keyed by the chat buffer name.
 local chats = {}
+local chats_by_input = {}
 
 local function tostr(v)
 	if v == nil then
@@ -561,6 +564,11 @@ end
 local function is_chat_name(name)
 	name = tostr(name)
 	return name:sub(1, #CHAT_PREFIX) == CHAT_PREFIX
+end
+
+local function is_input_name(name)
+	name = tostr(name)
+	return name:sub(1, #CHAT_INPUT_PREFIX) == CHAT_INPUT_PREFIX
 end
 
 local function is_shinny_buffer(name)
@@ -1117,25 +1125,39 @@ local function render_chat(chat)
 	local function add(line)
 		out[#out + 1] = line
 	end
+	local model = trim(tostr(option("chatmodel", "deepseek-chat")))
+	if model == "" then
+		model = "deepseek-chat"
+	end
+	local rule = string.rep("─", 30)
 
-	add("shinny chat · " .. chat.label)
-	add("Alt-i 提问 · 回答里的修改会直接应用到该文件（Ctrl-Z 可撤销）")
+	add(rule)
+	add(" shinny chat · " .. chat.label)
+	add(string.format(" %s · %d files", model, #open_buffers()))
+	add(rule)
 	add("")
 
 	if #chat.messages == 0 then
-		add("（还没有对话。按 Alt-i 输入问题，例如：）")
-		add("  解释光标处的代码")
-		add("  把选区改写成更专业的语言")
-		add("  把这行改成英文")
+		add(" 在下方输入栏（>）输入问题，Enter 发送。")
+		add(" 例：解释光标处的代码")
+		add("     把选区改写成更专业的语言 / 把这行改成英文")
 		add("")
 	end
 
 	for _, m in ipairs(chat.messages) do
-		add(m.role == "user" and "you:" or "assistant:")
-		add(m.content)
+		add(m.role == "user" and "› you" or "› shinny")
+		add("  " .. (tostr(m.content):gsub("\n", "\n  ")))
 		add("")
 	end
 
+	if chat.busy then
+		add("› shinny")
+		add("  正在思考…")
+		add("")
+	end
+
+	add(rule)
+	add(" Enter 发送 · Alt-i 聚焦 · Ctrl-Z 撤销")
 	return table.concat(out, "\n")
 end
 
@@ -1166,7 +1188,8 @@ local function set_chat_text(chat, text)
 	buf:Insert(buffer.Loc(0, 0), text)
 	chat.text = text
 
-	local loc = text_end_loc(text)
+	local end_loc = text_end_loc(text)
+	local loc = buffer.Loc(0, end_loc.Y)
 	pcall(function()
 		buf:GetActiveCursor():GotoLoc(loc)
 	end)
@@ -1262,16 +1285,16 @@ end
 local function send_chat(chat, question)
 	if chat.busy then
 		micro.InfoBar():Error("shinny: 上一个问题还在处理中")
-		return
+		return false
 	end
 	local key = chat_key()
 	if key == "" then
 		micro.InfoBar():Error("shinny: 没有 DeepSeek key — 运行 > set shinny.deepseekkey <key>")
-		return
+		return false
 	end
 
-	append_message(chat, "user", question)
 	chat.busy = true
+	append_message(chat, "user", question)
 
 	local body = chat_body(chat, build_context(chat))
 	local url = trim(tostr(option("chaturl", DEFAULT_DS_CHAT)))
@@ -1299,43 +1322,109 @@ local function send_chat(chat, question)
 		os.Setenv("SHINNY_KEY", "")
 		os.Setenv("SHINNY_BODY", "")
 		append_message(chat, "assistant", "（无法启动请求：" .. shorten(collapse(err), 300) .. "）")
+		return true
+	end
+	return true
+end
+
+local function reset_input(chat)
+	local buf = chat.ibuf
+	if buf == nil then
 		return
 	end
-end
-
-local function ask_chat(chat)
-	micro.InfoBar():Prompt("ask> ", "", "shinny-chat", nil, function(resp, canceled)
-		if canceled then
-			return
-		end
-		local q = trim(tostr(resp))
-		if q == "" then
-			return
-		end
-		send_chat(chat, q)
+	local text = buffer_text(buf)
+	pcall(function()
+		buf:Remove(buffer.Loc(0, 0), text_end_loc(text))
 	end)
+	buf:Insert(buffer.Loc(0, 0), INPUT_PROMPT)
+	local loc = buffer.Loc(#INPUT_PROMPT, 0)
+	pcall(function()
+		buf:GetActiveCursor():GotoLoc(loc)
+	end)
+	if chat.ipane ~= nil then
+		pcall(function()
+			chat.ipane:GotoLoc(loc)
+		end)
+	end
 end
 
-local function ensure_chat_pane(bp, chat)
-	local existing = find_pane_by_name(chat.name)
-	if existing ~= nil then
-		chat.pane = existing
-		return existing
+local function read_input(chat)
+	if chat.ibuf == nil then
+		return ""
+	end
+	local text = buffer_text(chat.ibuf)
+	text = text:gsub("^%s*>%s?", "")
+	return trim(text)
+end
+
+local function focus_input(chat)
+	local pane = find_pane_by_name(chat.input_name)
+	if pane ~= nil then
+		chat.ipane = pane
+	end
+	return pane
+end
+
+local function ensure_chat_panes(bp, chat)
+	local tpane = find_pane_by_name(chat.name)
+	local ipane = find_pane_by_name(chat.input_name)
+
+	if tpane == nil then
+		local tbuf = buffer.NewBuffer("", "")
+		tbuf:SetName(chat.name)
+		chat.buf = tbuf
+		chat.text = ""
+		tpane = bp:VSplitIndex(tbuf, true)
+		chat.pane = tpane
 	end
 
-	local buf = chat.buf
-	if buf == nil then
-		buf = buffer.NewBuffer("", "")
-		buf:SetName(chat.name)
-		chat.buf = buf
-		chat.text = ""
+	if ipane == nil then
+		if chat.ibuf == nil then
+			chat.ibuf = buffer.NewBuffer(INPUT_PROMPT, "")
+			chat.ibuf:SetName(chat.input_name)
+		end
+		ipane = tpane:HSplitIndex(chat.ibuf, true)
+		chat.ipane = ipane
+		reset_input(chat)
+		local tab = bp:Tab()
+		local ok, h = pcall(function()
+			return tab.H
+		end)
+		if ok and type(h) == "number" and h > 10 then
+			pcall(function()
+				ipane:ResizePane(h - 6)
+			end)
+		end
+	end
+
+	if chat.buf == nil then
+		chat.buf = tpane.Buf
 	end
 	set_chat_text(chat, render_chat(chat))
+	focus_input(chat)
+end
 
-	local pane = bp:VSplitBuf(buf)
-	chat.pane = pane
-	set_chat_text(chat, chat.text)
-	return pane
+function preInsertNewline(bp)
+	if bp == nil then
+		return true
+	end
+	local chat = chats_by_input[tostr(bp.Buf:GetName())]
+	if chat == nil then
+		return true
+	end
+	if chat.busy then
+		micro.InfoBar():Error("shinny: 上一个问题还在处理中")
+		return false
+	end
+	local text = read_input(chat)
+	if text == "" then
+		micro.InfoBar():Message("shinny: 输入问题后按 Enter 发送")
+		return false
+	end
+	if send_chat(chat, text) then
+		reset_input(chat)
+	end
+	return false
 end
 
 local function chat_for(bp)
@@ -1361,14 +1450,18 @@ local function chat_for(bp)
 			i = i + 1
 		until chat == nil or chat.key == key
 	end
+	local input_name = CHAT_INPUT_PREFIX .. chat_name:sub(#CHAT_PREFIX + 1)
 	if chat == nil then
 		chat = {
 			name = chat_name,
+			input_name = input_name,
 			key = key,
 			label = label,
 			messages = {},
 			buf = nil,
 			pane = nil,
+			ibuf = nil,
+			ipane = nil,
 			src_pane = bp,
 			busy = false,
 			text = "",
@@ -1376,7 +1469,11 @@ local function chat_for(bp)
 		chats[chat_name] = chat
 	else
 		chat.src_pane = bp
+		if chat.input_name == nil then
+			chat.input_name = input_name
+		end
 	end
+	chats_by_input[chat.input_name] = chat
 	return chat
 end
 
@@ -1454,10 +1551,18 @@ function shinny_chat(bp, args)
 		return
 	end
 
-	if is_chat_name(bp.Buf:GetName()) then
-		local chat = chats[bp.Buf:GetName()]
+	local name = bp.Buf:GetName()
+	if is_input_name(name) then
+		local chat = chats_by_input[name]
 		if chat ~= nil then
-			ask_chat(chat)
+			focus_input(chat)
+		end
+		return
+	end
+	if is_chat_name(name) then
+		local chat = chats[name]
+		if chat ~= nil then
+			focus_input(chat)
 		end
 		return
 	end
@@ -1467,8 +1572,8 @@ function shinny_chat(bp, args)
 		micro.InfoBar():Error("shinny: 无法创建 chat")
 		return
 	end
-	ensure_chat_pane(bp, chat)
-	ask_chat(chat)
+	ensure_chat_panes(bp, chat)
+	focus_input(chat)
 end
 
 function init()
