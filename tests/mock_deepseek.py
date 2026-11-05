@@ -169,6 +169,7 @@ class Handler(BaseHTTPRequestHandler):
                     events.append({"choices": [{"delta": {"content": part}}]})
                 events.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
             events.append({"choices": [], "usage": USAGE})
+            hold = "hold" in last_user
             if slow:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -181,6 +182,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 return
             self._sse(events)
+            if hold:
+                time.sleep(8)
             return
 
         self._send(404, {"error": {"message": "not found"}})

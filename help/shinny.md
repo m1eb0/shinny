@@ -52,7 +52,7 @@ Chat 能看到：
 
 Chat 的行为：
 
-* **流式输出**：回答边生成边显示；`Esc` 可随时停止
+* **流式输出**：回答边生成边显示；收到 `[DONE]` 立即收尾，30 秒无数据会保留部分内容并结束；`Esc` 可随时停止
 * **思考模式**：`reasoning_content` 单独保存，`shinny.showthinking` 打开后显示
 * **会话持久化**：每个文件的会话保存在 `~/.config/micro/shinny/chats/`，重启 micro 可恢复
 * **用量可见**：顶部显示 token 用量与 cache 命中率；`> shinny-usage` 查看累计值；`> shinny-chat-new` 清空会话

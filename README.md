@@ -92,7 +92,7 @@ Chat 的上下文包括：
 
 Chat 是流式的：回答边生成边显示，`Esc` 停止；思考内容单独保存（`shinny.showthinking` 可显示）。模型通过 function calling 调用 `replace_selection` / `insert_at_cursor` / `replace_line` / `read_file` 修改文件，写入走 micro 的 buffer 事件，`Ctrl-Z` 可撤销。
 
-会话按文件持久化在 `~/.config/micro/shinny/chats/`，重启 micro 能恢复；顶部显示 token 用量和 cache 命中率，`> shinny-usage` 查看累计值，`> shinny-chat-new` 清空会话。上下文按 `shinny.chattokenbudget`（token 估算）裁剪；system prompt 固定、易变上下文注入最新一条 user 消息，以尽量命中 DeepSeek 的前缀缓存。
+流式收到 `[DONE]` 会立即收尾，不再等 curl 连接关闭；如果 30 秒没有任何数据，会保留已收到的部分内容并结束（信息栏提示超时）。会话按文件持久化在 `~/.config/micro/shinny/chats/`，重启 micro 能恢复；顶部显示 token 用量和 cache 命中率，`> shinny-usage` 查看累计值，`> shinny-chat-new` 清空会话。上下文按 `shinny.chattokenbudget`（token 估算）裁剪；system prompt 固定、易变上下文注入最新一条 user 消息，以尽量命中 DeepSeek 的前缀缓存。
 
 ### Markdown 预览
 

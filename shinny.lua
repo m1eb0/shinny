@@ -1,4 +1,4 @@
-VERSION = "0.7.1"
+VERSION = "0.7.2"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -52,6 +52,8 @@ local last_search_query = ""
 local chats = {}
 local chats_by_input = {}
 local chats_by_key = {}
+local TICK = 0
+local WATCHDOG_STARTED = false
 local PROCESS_TOKEN = (tostring({}):match("0x(%x+)") or tostring(math.random(100000, 999999)))
 
 local function tostr(v)
@@ -1917,6 +1919,8 @@ function start_request(chat)
 	chat.stream = { content = "", reasoning = "", tools = {}, usage = nil }
 	chat.streaming = true
 	chat.canceled = false
+	chat.timeout = false
+	chat.last_activity = TICK
 	chat.sbuf = ""
 	chat.raw = ""
 	chat.think_bucket = 0
@@ -1969,6 +1973,7 @@ function start_request(chat)
 end
 
 function handle_stream_chunk(chat, chunk)
+	chat.last_activity = TICK
 	chat.sbuf = (chat.sbuf or "") .. tostr(chunk)
 	chat.raw = (chat.raw or "") .. tostr(chunk)
 	while true do
@@ -1983,6 +1988,15 @@ function handle_stream_chunk(chat, chunk)
 			local payload = trim(line:sub(6))
 			if payload == "[DONE]" then
 				chat.stream.done = true
+				if chat.job ~= nil then
+					pcall(shell.JobStop, chat.job)
+					chat.job = nil
+				end
+				micro.After(0, function()
+					if chat.streaming then
+						handle_stream_exit(chat, "")
+					end
+				end)
 			elseif payload ~= "" then
 				local ok, data = pcall(json_decode, payload)
 				if ok and type(data) == "table" then
@@ -2016,6 +2030,49 @@ function handle_stream_chunk(chat, chunk)
 	end
 end
 
+function finalize_timeout(chat)
+	if chat.body_path ~= nil then
+		pcall(os.Remove, chat.body_path)
+		chat.body_path = nil
+	end
+	local partial = chat.stream and chat.stream.content or ""
+	local note = "（响应超时，已保留部分内容）"
+	local content = partial ~= "" and (partial .. "\n\n" .. note) or note
+	chat.messages[#chat.messages + 1] = {
+		role = "assistant",
+		content = content,
+		display = content,
+		reasoning_content = chat.stream and chat.stream.reasoning or nil,
+	}
+	save_chat(chat)
+	replace_chat_text(chat, render_chat(chat, false))
+	micro.InfoBar():Message("shinny: 响应超时，已保留部分内容")
+end
+
+local function watch_chats()
+	TICK = TICK + 1
+	for _, chat in pairs(chats) do
+		if chat.streaming and chat.job ~= nil then
+			local last = chat.last_activity or TICK
+			if TICK - last >= 6 then
+				chat.timeout = true
+				local job = chat.job
+				chat.job = nil
+				if job ~= nil then
+					pcall(shell.JobStop, job)
+				end
+				micro.After(0, function()
+					if chat.streaming then
+						chat.streaming = false
+						finalize_timeout(chat)
+					end
+				end)
+			end
+		end
+	end
+	micro.After(5000000000, watch_chats)
+end
+
 function finalize_cancel(chat)
 	local partial = chat.stream and chat.stream.content or ""
 	local content = partial ~= "" and (partial .. "\n\n（已停止）") or "（已停止）"
@@ -2037,6 +2094,11 @@ function handle_stream_exit(chat, output)
 		chat.body_path = nil
 	end
 	if not chat.streaming then
+		return
+	end
+	if chat.timeout then
+		chat.streaming = false
+		finalize_timeout(chat)
 		return
 	end
 	local status = nil
@@ -2067,7 +2129,7 @@ function handle_stream_exit(chat, output)
 		end
 	end
 
-	if (status == nil or status < 200 or status >= 300) and partial == "" and #tools == 0 then
+	if (status == nil or status < 200 or status >= 300) and partial == "" and #tools == 0 and (chat.stream.reasoning or "") == "" then
 		local detail = error_detail(chat.raw or "")
 		if detail == "" then
 			detail = status ~= nil and ("HTTP " .. tostr(status)) or "流式响应为空"
@@ -3253,4 +3315,8 @@ function init()
 	config.TryBindKey("Alt-Enter", "command:shinny-chat-newline", false)
 	config.TryBindKey("Alt-r", "command:shinny-preview", false)
 	start_input_watch()
+	if not WATCHDOG_STARTED then
+		WATCHDOG_STARTED = true
+		micro.After(5000000000, watch_chats)
+	end
 end
