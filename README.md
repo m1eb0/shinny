@@ -80,11 +80,14 @@ micro 2.0.15 的 tcell 还无法解码 Ghostty 默认发送的 `CSI 27;2;13~`：
 
 其他终端也可以把 `Shift+Enter` 映射为 `ESC` + `CR`；对应地，插件的 `shinny-chat-newline` 命令也可以手动绑定。插件同时兼容 `ESC` 与 `CR` 被拆成两次按键事件的情况（300ms 内视为一次 `Shift+Enter`）。
 
-Chat 的上下文包括：
+Chat **每轮自动注入**：
 
-- 当前文件和其他所有打开的文件（按 `shinny.chatcontext` 字符预算截断）
-- 光标所在行/列、选中文本
+- 当前文件路径、光标行列、**整个光标所在行**
+- 如果发送前有选区，注入**整个选区**（不截断）
+- 所有打开文件的路径列表（不注入内容）
 - 最近一次搜索的完整结果
+
+文件全文**不会**每轮注入。需要时模型调用 `read_current_file`（当前文件，含未保存修改）、`read_open_file(path)`（任意打开文件）、`read_file(path)`（磁盘）或 `list_open_files` 按需读取。
 
 可以直接说「解释光标处的代码」「把选区改写成更专业的语言」「把这行改成英文」。
 
@@ -151,7 +154,6 @@ micro 本身只做 Markdown 语法高亮，不渲染排版。编辑文件时按 
 | `shinny.depth` / `shinny.includeanswer` | `basic` / `true` |
 | `shinny.chatmodel` | `deepseek-flash` |
 | `shinny.thinking` / `shinny.effort` | `true` / `high` |
-| `shinny.chatcontext` | `24000` |
 | `shinny.chattokenbudget` | `24000` |
 | `shinny.showthinking` | `false` |
 | `shinny.imagedetail` | `auto` |
@@ -176,7 +178,7 @@ chat 分屏、输入栏、搜索结果 tab 和帮助页都带语法高亮（角�
 ## 开发
 
 ```sh
-make test    # 30 个 headless 测试 + 2 个走本地 mock 的端到端测试
+make test    # 33 个 headless 测试 + 2 个走本地 mock 的端到端测试
 ```
 
 `tests/run.lua` 用假的 micro API 跑逻辑；`tests/integration.sh` 启动

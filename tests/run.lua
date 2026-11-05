@@ -819,16 +819,17 @@ test("chat applies cursor insert and line replacement", function()
 	assert_contains(bp.Buf:text(), "This line has been translated.")
 end)
 
-test("chat sees other open files", function()
+test("chat lists open files without injecting their contents", function()
 	local bp = setup_search("tavily")
 	local other = new_buffer("OTHER FILE CONTENT\n", "/tmp/other.md")
 	new_pane(other)
-	state.chat_sse = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
+	state.chat_sse = sse_text("ok")
 	run(shinny_chat, bp, nil)
 	ask("看看别的文件")
 
-	assert_contains(state.job_env.BODY, "OTHER FILE CONTENT")
-	assert_contains(state.job_env.BODY, "打开的文件")
+	assert_contains(state.job_env.BODY, "/tmp/other.md")
+	assert_contains(state.job_env.BODY, "read_current_file")
+	assert_true(not state.job_env.BODY:find("OTHER FILE CONTENT", 1, true), "file content was injected")
 end)
 
 test("chat keeps the question when no DeepSeek key is configured", function()
@@ -1037,6 +1038,35 @@ test("debug log records the raw stream and exit", function()
 	assert_contains(log, "[chunk")
 	assert_contains(log, "=== exit")
 	assert_contains(log, "finish_reason=stop")
+end)
+
+test("read_current_file tool fetches the buffer on demand", function()
+	local bp = setup_search("tavily")
+	local read_sse = 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_read","type":"function","function":{"name":"read_current_file","arguments":"{}"}}]}}]}\n\n'
+		.. 'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n'
+		.. 'data: [DONE]\n\n'
+	state.chat_queue = { read_sse, FINAL_SSE }
+	run(shinny_chat, bp, nil)
+	ask("读取当前文件")
+
+	assert_true(#state.chat_bodies == 2, "expected tool round")
+	assert_contains(state.chat_bodies[2], '"role":"tool"')
+	assert_contains(state.chat_bodies[2], "NVME集群")
+	assert_contains(transcript_pane().Buf:text(), "已完成修改。")
+end)
+
+test("injects the full cursor line and selection", function()
+	local bp = new_pane(new_buffer("  hello world  \nsecond line\n", "/tmp/ctx.md"))
+	state.chat_sse = sse_text("ok")
+	run(shinny_chat, bp, nil)
+	bp.Cursor.sel = { { X = 2, Y = 0 }, { X = 13, Y = 0 } }
+	ask("看看选区")
+
+	assert_contains(state.job_env.BODY, "光标所在行")
+	assert_contains(state.job_env.BODY, "  hello world  ")
+	assert_contains(state.job_env.BODY, "选中文本")
+	assert_contains(state.job_env.BODY, "hello world")
+	assert_true(not state.job_env.BODY:find("second line", 1, true), "file body was injected")
 end)
 
 test("chat persists the conversation to disk", function()

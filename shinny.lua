@@ -1,4 +1,4 @@
-VERSION = "0.7.4"
+VERSION = "0.7.5"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -558,7 +558,7 @@ local function error_detail(payload)
 	return ""
 end
 
-local function selected_text(bp)
+local function selected_text_raw(bp)
 	if bp == nil then
 		return ""
 	end
@@ -569,13 +569,17 @@ local function selected_text(bp)
 		return ""
 	end
 	if type(sel) == "string" then
-		return trim(sel)
+		return sel
 	end
 	local ok2, text = pcall(util.String, sel)
 	if not ok2 or text == nil then
 		return ""
 	end
-	return trim(text)
+	return text
+end
+
+local function selected_text(bp)
+	return trim(selected_text_raw(bp))
 end
 
 local function join_args(args)
@@ -1068,97 +1072,6 @@ end
 -- chat context
 -- ---------------------------------------------------------------------------
 
-local function build_context(chat)
-	local parts = {}
-	local function add(line)
-		parts[#parts + 1] = line
-	end
-
-	add("你是运行在 micro 编辑器里的编程助手。用户正在编辑文件，你可以看到下面列出的上下文。")
-	add("回答用中文，简洁、直接。")
-
-	local src = chat.src_pane
-	local src_name = nil
-	if src ~= nil then
-		local ok = pcall(function()
-			src_name = src.Buf:GetName()
-		end)
-		if not ok then
-			src = nil
-			src_name = nil
-		end
-	end
-
-	if src_name then
-		add("")
-		add("当前文件: " .. src_name)
-		add(string.format("光标位置: 第 %d 行, 第 %d 列", src.Cursor.Y + 1, src.Cursor.X + 1))
-		local okline, line = pcall(function()
-			return src.Buf:Line(src.Cursor.Y)
-		end)
-		if okline then
-			add("光标所在行: " .. line)
-		end
-		local selection = selected_text(src)
-		if selection ~= "" then
-			add("选中文本:")
-			add(utf8_prefix(selection, 3000))
-		else
-			add("选中文本: （无）")
-		end
-	end
-
-	if last_search_text ~= "" then
-		add("")
-		add("最近一次搜索结果（查询「" .. last_search_query .. "」）:")
-		add(utf8_prefix(last_search_text, 6000))
-	end
-
-	add("")
-	add("打开的文件:")
-	local budget = option_number("chatcontext", 24000)
-	local used = 0
-	local files = open_buffers()
-	for _, b in ipairs(files) do
-		if used >= budget then
-			break
-		end
-		local name = "?"
-		pcall(function()
-			name = b:GetName()
-		end)
-		local text = buffer_text(b)
-		local cap = budget - used
-		if name == src_name then
-			cap = math.min(cap, 12000)
-		else
-			cap = math.min(cap, 4000)
-		end
-		if #text > cap then
-			text = utf8_prefix(text, cap) .. "\n…（已截断）"
-		end
-		used = used + #text
-		add("")
-		add("### 文件: " .. name .. (name == src_name and "（当前文件）" or ""))
-		add(text)
-	end
-
-	add("")
-	add("修改文件的规则：")
-	add("当用户要求修改当前文件时，在回答里嵌入下面格式的块（可以有多个）：")
-	add("<<<SHINNY_EDIT selection>>>")
-	add("替换当前选区的新文本")
-	add("<<<SHINNY_EDIT_END>>>")
-	add("target 可以是 selection（替换选区）、cursor（插入到光标处）、line（替换光标所在行）。")
-	add("编辑块不要放在 markdown 代码围栏里；不需要修改文件时不要输出编辑块。")
-
-	return table.concat(parts, "\n")
-end
-
--- ---------------------------------------------------------------------------
--- chat edits
--- ---------------------------------------------------------------------------
-
 local function valid_pane(pane)
 	if pane == nil then
 		return false
@@ -1490,16 +1403,23 @@ end
 local SYSTEM_PROMPT = [[
 你是运行在 micro 编辑器里的编程助手。回答用中文，简洁、直接。
 
-你可以调用工具修改用户正在编辑的文件：
+每轮会自动提供：当前文件路径、光标位置、光标所在行、选中文本（如果有）、打开的文件列表。文件全文不会自动注入。
+
+需要更多上下文时调用工具：
+- read_current_file(): 当前文件全文（含未保存修改）
+- read_open_file(path): 读取任意已打开文件（含未保存修改）
+- list_open_files(): 列出打开的文件
+- read_file(path): 从磁盘读取文件
+
+修改文件时调用：
 - replace_selection(text): 用 text 替换当前选区
 - insert_at_cursor(text): 在光标处插入 text
 - replace_line(text): 用 text 替换光标所在行
-- read_file(path): 读取一个文件（用于查看未打开的文件）
 
 规则：
 1. 需要修改文件时调用工具，不要输出补丁让用户自己粘贴。
-2. 一次工具调用只做一件事；拿到工具结果后继续，直到给出最终回答。
-3. 只有用户明确要求修改时才调用写工具；不确定内容时先读上下文或 read_file。
+2. 一次工具调用只做一件事；拿到结果后继续，直到给出最终回答。
+3. 只有用户明确要求修改时才调用写工具；不确定内容时先读当前文件/相关文件。
 4. 修改完成后用一两句话说明你做了什么。
 ]]
 
@@ -1508,7 +1428,10 @@ local TOOLS_JSON = [[
   {"type":"function","function":{"name":"replace_selection","description":"Replace the current selection in the active file.","parameters":{"type":"object","properties":{"text":{"type":"string","description":"The new text for the selection"}},"required":["text"]}}},
   {"type":"function","function":{"name":"insert_at_cursor","description":"Insert text at the cursor in the active file.","parameters":{"type":"object","properties":{"text":{"type":"string","description":"The text to insert"}},"required":["text"]}}},
   {"type":"function","function":{"name":"replace_line","description":"Replace the line under the cursor in the active file.","parameters":{"type":"object","properties":{"text":{"type":"string","description":"The new line content"}},"required":["text"]}}},
-  {"type":"function","function":{"name":"read_file","description":"Read a file and return its contents.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"Path of the file to read"}},"required":["path"]}}}
+  {"type":"function","function":{"name":"read_current_file","description":"Read the full text of the file currently open in the editor, including unsaved changes.","parameters":{"type":"object","properties":{}}}},
+  {"type":"function","function":{"name":"read_open_file","description":"Read an open editor buffer by path, including unsaved changes.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"Path/name of the open file"}},"required":["path"]}}},
+  {"type":"function","function":{"name":"list_open_files","description":"List the paths of files currently open in the editor.","parameters":{"type":"object","properties":{}}}},
+  {"type":"function","function":{"name":"read_file","description":"Read a file from disk and return its contents.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"Path of the file to read"}},"required":["path"]}}}
 ]
 ]]
 
@@ -1607,21 +1530,20 @@ local function build_context_block(chat)
 		end
 	end
 
-	if src_name then
-		add("当前文件: " .. src_name)
+	if src ~= nil then
+		add("当前文件: " .. (src_name or "untitled"))
 		add(string.format("光标位置: 第 %d 行, 第 %d 列", src.Cursor.Y + 1, src.Cursor.X + 1))
 		local okline, line = pcall(function()
 			return src.Buf:Line(src.Cursor.Y)
 		end)
 		if okline then
-			add("光标所在行: " .. line)
+			add("光标所在行:")
+			add(tostr(line))
 		end
 		local selection = selected_text(src)
 		if selection ~= "" then
 			add("选中文本:")
-			add(utf8_prefix(selection, 3000))
-		else
-			add("选中文本: （无）")
+			add(selection)
 		end
 	end
 
@@ -1632,33 +1554,17 @@ local function build_context_block(chat)
 	end
 
 	add("")
-	add("打开的文件:")
-	local budget = option_number("chatcontext", 24000)
-	local used = 0
+	add("打开的文件（不自动注入内容；需要时调用工具读取）:")
 	local files = open_buffers()
 	for _, b in ipairs(files) do
-		if used >= budget then
-			break
-		end
 		local name = "?"
 		pcall(function()
 			name = b:GetName()
 		end)
-		local text = buffer_text(b)
-		local cap = budget - used
-		if name == src_name then
-			cap = math.min(cap, 12000)
-		else
-			cap = math.min(cap, 4000)
-		end
-		if #text > cap then
-			text = utf8_prefix(text, cap) .. "\n…（已截断）"
-		end
-		used = used + #text
-		add("")
-		add("### 文件: " .. name .. (name == src_name and "（当前文件）" or ""))
-		add(text)
+		add("- " .. name)
 	end
+	add("")
+	add("需要文件全文时调用 read_current_file / read_open_file / read_file，或用 list_open_files 重新列出。")
 
 	return table.concat(parts, "\n")
 end
@@ -1870,6 +1776,14 @@ local function chat_key()
 	return trim(tostr(option("deepseekkey", "")))
 end
 
+local function tool_text(text)
+	text = tostr(text)
+	if #text > 60000 then
+		return utf8_prefix(text, 60000) .. "\n…（已截断）"
+	end
+	return text
+end
+
 local function execute_tool(chat, call)
 	local fn = call["function"] or {}
 	local name = tostr(fn.name)
@@ -1891,10 +1805,40 @@ local function execute_tool(chat, call)
 		local ok, note = apply_edit(chat, target, tostr(args.text or ""))
 		local result = ok and tostr(note) or ("error: " .. tostr(note))
 		return result, result
-	elseif name == "read_file" then
+	elseif name == "read_current_file" then
+		if chat.src_pane == nil or chat.src_pane.Buf == nil then
+			return "error: no current file", "没有当前文件"
+		end
+		local text = buffer_text(chat.src_pane.Buf)
+		return tool_text(text), "已读取当前文件"
+	elseif name == "list_open_files" then
+		local names = {}
+		for _, b in ipairs(open_buffers()) do
+			local n = "?"
+			pcall(function()
+				n = tostr(b:GetName())
+			end)
+			names[#names + 1] = n
+		end
+		if #names == 0 then
+			return "no open files", "没有打开的文件"
+		end
+		return table.concat(names, "\n"), "已列出 " .. tostring(#names) .. " 个文件"
+	elseif name == "read_open_file" or name == "read_file" then
 		local path = trim(tostr(args.path or ""))
 		if path == "" then
 			return "error: missing path", "缺少 path"
+		end
+		if name == "read_open_file" then
+			for _, b in ipairs(open_buffers()) do
+				local n = ""
+				pcall(function()
+					n = tostr(b:GetName())
+				end)
+				if n == path or basename(n) == path then
+					return tool_text(buffer_text(b)), "已读取 " .. shorten(n, 40)
+				end
+			end
 		end
 		local ok, data = pcall(ioutil.ReadFile, path)
 		if not ok or data == nil then
@@ -1904,7 +1848,7 @@ local function execute_tool(chat, call)
 		pcall(function()
 			text = fmt.Sprintf("%s", data)
 		end)
-		return utf8_prefix(tostr(text), 8000), "已读取 " .. shorten(path, 40)
+		return tool_text(tostr(text)), "已读取 " .. shorten(path, 40)
 	end
 	return "error: unknown tool " .. name, "未知工具"
 end
@@ -2758,6 +2702,7 @@ local function render_help()
 	add("- 模型通过 function calling 直接修改文件（`Ctrl-Z` 可撤销）")
 	add("- 会话按文件保存到 `~/.config/micro/shinny/chats`，重启可恢复")
 	add("- 底部会显示 token 用量和 cache 命中率")
+	add("- 每轮只注入光标行/选区/文件列表，需要全文时模型调用 read_current_file / read_open_file")
 	add("- `> shinny-preview` 用 `rich` 渲染当前 buffer 或最后一条回答（新 tab）")
 	add("- 支持图片输入（PNG / JPEG / GIF / WebP）：`> shinny-image ~/shot.png`，或直接 `> shinny-image` 读剪贴板；图片随下一条消息发送")
 	add("")
@@ -2801,7 +2746,7 @@ local function render_help()
 	add("")
 	add("`shinny.prefix`、`shinny.suffix`、`shinny.backend`、`shinny.apikey`、")
 	add("`shinny.deepseekkey`、`shinny.chatmodel`、`shinny.thinking`、`shinny.effort`、")
-	add("`shinny.maxresults`、`shinny.chatcontext`、`shinny.chattokenbudget`、`shinny.showthinking`、`shinny.imagedetail`、`shinny.imagemaxmb`、`shinny.maxtokens`、`shinny.debug`")
+	add("`shinny.maxresults`、`shinny.chattokenbudget`、`shinny.showthinking`、`shinny.imagedetail`、`shinny.imagemaxmb`、`shinny.maxtokens`、`shinny.debug`")
 	add("")
 	add("完整文档：`> help shinny`")
 	return table.concat(lines, "\n") .. "\n"
@@ -3426,7 +3371,6 @@ function init()
 	config.RegisterGlobalOption("shinny", "chatmodel", DEFAULT_MODEL)
 	config.RegisterGlobalOption("shinny", "thinking", true)
 	config.RegisterGlobalOption("shinny", "effort", DEFAULT_EFFORT)
-	config.RegisterGlobalOption("shinny", "chatcontext", 24000)
 	config.RegisterGlobalOption("shinny", "maxtokens", 65536)
 	config.RegisterGlobalOption("shinny", "debug", true)
 	config.RegisterGlobalOption("shinny", "chattokenbudget", 24000)

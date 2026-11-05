@@ -36,11 +36,14 @@
 
 > `Shift+Enter` 在普通编辑区和 chat 输入栏都可用（普通编辑区会沿用当前行缩进）；它需要终端把它映射成 `Alt-Enter`。Ghostty 在 `~/.config/ghostty/config.ghostty` 写 `keybind = shift+enter=text:\x1b\r`，然后 `ctrl+shift+,` 重载配置。原因：micro 2.0.15 的 tcell 还不认识 Ghostty 默认发的 `CSI 27;2;13~`，会把 `ESC [` 当成 `Alt-[` 从而跳到 buffer 开头。插件已把 `Alt-Enter` 绑定到输入栏换行。
 
-Chat 能看到：
+Chat **每轮自动注入**：
 
-* 当前文件和其他所有打开的文件（内容按预算截断）
-* 光标所在行/列、选中的文本
+* 当前文件路径、光标行列、**整个光标所在行**
+* 如果发送前有选区，注入**整个选区**
+* 所有打开文件的路径列表（不注入内容）
 * 最近一次 Tavily / DeepSeek 搜索的结果
+
+文件全文不会每轮注入。需要时模型调用 `read_current_file`、`read_open_file(path)`、`read_file(path)` 或 `list_open_files` 按需读取。
 
 可以直接让它改文件，例如：
 
@@ -138,7 +141,6 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny.chatmodel` | `deepseek-flash` | chat 模型 |
 | `shinny.thinking` | `true` | 是否开启思考模式 |
 | `shinny.effort` | `high` | 思考强度（low/high/max） |
-| `shinny.chatcontext` | `24000` | 发给 chat 的文件上下文字节预算 |
 | `shinny.chattokenbudget` | `24000` | 历史消息的 token 预算 |
 | `shinny.showthinking` | `false` | 是否在对话里显示思考内容 |
 | `shinny.imagedetail` | `auto` | 图片 detail：`low` / `high` / `original` / `auto` |
