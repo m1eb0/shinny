@@ -207,7 +207,9 @@ local function new_pane(buf)
 		state.split_count = state.split_count + 1
 		return p
 	end
-	function pane:ResizePane(size) end
+	function pane:ResizePane(size)
+		self.last_resize = size
+	end
 	function pane:Tab()
 		return { H = 40 }
 	end

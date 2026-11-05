@@ -1,4 +1,4 @@
-VERSION = "0.5.4"
+VERSION = "0.5.5"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -2155,11 +2155,32 @@ function resize_chat_input(chat)
 	pcall(function()
 		h = chat.src_pane:Tab().H
 	end)
-	if type(h) == "number" and h > lines + 2 then
-		pcall(function()
-			chat.ipane:ResizePane(h - (lines + 1))
-		end)
+	if type(h) ~= "number" or h <= lines + 2 then
+		return
 	end
+	if chat.last_input_lines == lines and chat.last_input_h == h then
+		return
+	end
+	chat.last_input_lines = lines
+	chat.last_input_h = h
+	pcall(function()
+		chat.ipane:ResizePane(h - (lines + 1))
+	end)
+end
+
+local function watch_input_panes()
+	for _, chat in pairs(chats_by_input) do
+		pcall(resize_chat_input, chat)
+	end
+	micro.After(250000000, watch_input_panes)
+end
+
+local function start_input_watch()
+	if INPUT_WATCH then
+		return
+	end
+	INPUT_WATCH = true
+	micro.After(250000000, watch_input_panes)
 end
 
 local function ensure_chat_panes(bp, chat)
@@ -2838,4 +2859,5 @@ function init()
 
 	config.TryBindKey("Alt-i", "command:shinny-chat", false)
 	config.TryBindKey("Alt-Enter", "command:shinny-chat-newline", false)
+	start_input_watch()
 end
