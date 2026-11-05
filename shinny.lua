@@ -1,4 +1,4 @@
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -1159,98 +1159,12 @@ end
 
 local chat_settings
 
-local function render_chat(chat)
-	local out = {}
-	local function add(line)
-		out[#out + 1] = line
-	end
-	local settings = chat_settings()
-	local thinking_label = settings.thinking and ("thinking " .. settings.effort) or "no thinking"
-	local rule = string.rep("─", 30)
-
-	add(rule)
-	add(" shinny chat")
-	local nfiles = #open_buffers()
-	add(" " .. chat.label .. " · " .. (nfiles == 1 and "1 file" or (nfiles .. " files")))
-	add(" " .. settings.model .. " · " .. thinking_label)
-	add(rule)
-	add("")
-
-	if #chat.messages == 0 then
-		add(" 在下方输入栏（>）输入问题，Enter 发送。")
-		add(" 例：解释光标处的代码")
-		add("     把选区改写成更专业的语言 / 把这行改成英文")
-		add("")
-	end
-
-	for _, m in ipairs(chat.messages) do
-		add(m.role == "user" and "› you" or "› shinny")
-		add("  " .. (tostr(m.content):gsub("\n", "\n  ")))
-		add("")
-	end
-
-	if chat.busy then
-		add("› shinny")
-		add("  正在思考…")
-		add("")
-	end
-
-	add(rule)
-	add(" Enter 发送 · Alt-i 聚焦 · Ctrl-Z 撤销")
-	return table.concat(out, "\n")
-end
-
-local function text_end_loc(text)
-	text = tostr(text)
-	if text == "" then
-		return buffer.Loc(0, 0)
-	end
-	local y, last = 0, 0
-	for p in text:gmatch("\n()") do
-		y = y + 1
-		last = p
-	end
-	return buffer.Loc(#text - last, y)
-end
-
-local function set_chat_text(chat, text)
-	local buf = chat.buf
-	if buf == nil then
-		return
-	end
-	local old = chat.text or ""
-	if #old > 0 then
-		pcall(function()
-			buf:Remove(buffer.Loc(0, 0), text_end_loc(old))
-		end)
-	end
-	buf:Insert(buffer.Loc(0, 0), text)
-	chat.text = text
-
-	local end_loc = text_end_loc(text)
-	local loc = buffer.Loc(0, end_loc.Y)
-	pcall(function()
-		buf:GetActiveCursor():GotoLoc(loc)
-	end)
-	if chat.pane ~= nil then
-		pcall(function()
-			chat.pane:GotoLoc(loc)
-		end)
-	end
-end
-
-local function chat_key()
-	local env = trim(os.Getenv("DEEPSEEK_API_KEY"))
-	if env ~= "" then
-		return env
-	end
-	return trim(tostr(option("deepseekkey", "")))
-end
-
 local function normalize_effort(value)
 	value = trim(tostr(value)):lower()
-	if value == "minimal" or value == "medium" or value == "xhigh" then
-		return value == "minimal" and "low" or "high"
+	if value == "minimal" then
+		return "low"
+	elseif value == "medium" or value == "xhigh" then
+		return "high"
 	end
 	if value ~= "low" and value ~= "high" and value ~= "max" then
 		return DEFAULT_EFFORT
@@ -1270,22 +1184,345 @@ function chat_settings()
 	}
 end
 
-local function chat_body(chat, context)
+local function est_tokens(s)
+	s = tostr(s)
+	local cjk = 0
+	for i = 1, #s do
+		if s:byte(i) >= 0xE0 then
+			cjk = cjk + 1
+		end
+	end
+	local rest = #s - cjk * 3
+	if rest < 0 then
+		rest = 0
+	end
+	return cjk + math.ceil(rest / 4)
+end
+
+local function fmt_tokens(n)
+	n = tonumber(n) or 0
+	if n >= 1000 then
+		return string.format("%.1fk", n / 1000)
+	end
+	return tostring(math.floor(n))
+end
+
+local function encode_json(v)
+	local t = type(v)
+	if t == "string" then
+		return '"' .. json_escape(v) .. '"'
+	elseif t == "number" then
+		if v ~= v or v == math.huge or v == -math.huge then
+			return "null"
+		end
+		if v == math.floor(v) and math.abs(v) < 1e15 then
+			return string.format("%.0f", v)
+		end
+		return string.format("%.10g", v)
+	elseif t == "boolean" then
+		return v and "true" or "false"
+	elseif t == "table" then
+		local n = #v
+		if n > 0 then
+			local parts = {}
+			for i = 1, n do
+				parts[#parts + 1] = encode_json(v[i])
+			end
+			return "[" .. table.concat(parts, ",") .. "]"
+		end
+		local parts = {}
+		for k, val in pairs(v) do
+			if type(k) == "string" then
+				parts[#parts + 1] = '"' .. json_escape(k) .. '":' .. encode_json(val)
+			end
+		end
+		return "{" .. table.concat(parts, ",") .. "}"
+	end
+	return "null"
+end
+
+local function chat_dir()
+	return config.ConfigDir .. "/shinny/chats"
+end
+
+local function chat_file(chat)
+	local base = tostr(chat.label):gsub("[^%w_.-]", "_")
+	local sum = 0
+	for i = 1, #chat.key do
+		sum = (sum * 31 + chat.key:byte(i)) % 1000000007
+	end
+	return chat_dir() .. "/" .. base .. "-" .. tostring(sum) .. ".json"
+end
+
+local function save_chat(chat)
+	local data = {
+		version = 1,
+		key = chat.key,
+		usage = chat.usage or {},
+		messages = chat.messages,
+	}
+	local ok, text = pcall(encode_json, data)
+	if not ok then
+		return
+	end
+	pcall(os.MkdirAll, chat_dir(), 448)
+	pcall(ioutil.WriteFile, chat_file(chat), text, 384)
+end
+
+local function load_chat(chat)
+	local ok, data = pcall(ioutil.ReadFile, chat_file(chat))
+	if not ok or data == nil then
+		return
+	end
+	local ok2, text = pcall(function()
+		return fmt.Sprintf("%s", data)
+	end)
+	if not ok2 then
+		return
+	end
+	local ok3, obj = pcall(json_decode, text)
+	if not ok3 or type(obj) ~= "table" then
+		return
+	end
+	if type(obj.messages) == "table" then
+		local msgs = {}
+		for _, m in ipairs(obj.messages) do
+			if type(m) == "table" and type(m.role) == "string" then
+				msgs[#msgs + 1] = m
+			end
+		end
+		chat.messages = msgs
+	end
+	if type(obj.usage) == "table" then
+		chat.usage = obj.usage
+	end
+end
+
+local function text_end_loc(text)
+	text = tostr(text)
+	if text == "" then
+		return buffer.Loc(0, 0)
+	end
+	local y, last = 0, 0
+	for p in text:gmatch("\n()") do
+		y = y + 1
+		last = p
+	end
+	return buffer.Loc(#text - last, y)
+end
+
+local function scroll_chat(chat)
+	if chat.pane == nil then
+		return
+	end
+	local loc = text_end_loc(chat.text)
+	loc = buffer.Loc(0, loc.Y)
+	pcall(function()
+		chat.pane:GotoLoc(loc)
+	end)
+end
+
+local function buffer_end_loc(buf)
+	local ok, n = pcall(function()
+		return buf:LinesNum()
+	end)
+	if ok and type(n) == "number" and n > 0 then
+		local last = buf:Line(n - 1)
+		return buffer.Loc(#last, n - 1)
+	end
+	return buffer.Loc(0, 0)
+end
+
+local function replace_chat_text(chat, text)
+	local buf = chat.buf
+	if buf == nil then
+		return
+	end
+	local old = chat.text or ""
+	if #old > 0 then
+		pcall(function()
+			buf:Remove(buffer.Loc(0, 0), buffer_end_loc(buf))
+		end)
+	end
+	buf:Insert(buffer.Loc(0, 0), text)
+	chat.text = text
+	scroll_chat(chat)
+end
+
+local function stream_append(chat, text)
+	if chat.buf == nil or not chat.streaming or text == "" then
+		return
+	end
+	local loc = text_end_loc(chat.text)
+	chat.buf:Insert(loc, text)
+	chat.text = chat.text .. text
+	scroll_chat(chat)
+end
+
+local SYSTEM_PROMPT = [[
+你是运行在 micro 编辑器里的编程助手。回答用中文，简洁、直接。
+
+你可以调用工具修改用户正在编辑的文件：
+- replace_selection(text): 用 text 替换当前选区
+- insert_at_cursor(text): 在光标处插入 text
+- replace_line(text): 用 text 替换光标所在行
+- read_file(path): 读取一个文件（用于查看未打开的文件）
+
+规则：
+1. 需要修改文件时调用工具，不要输出补丁让用户自己粘贴。
+2. 一次工具调用只做一件事；拿到工具结果后继续，直到给出最终回答。
+3. 只有用户明确要求修改时才调用写工具；不确定内容时先读上下文或 read_file。
+4. 修改完成后用一两句话说明你做了什么。
+]]
+
+local TOOLS_JSON = [[
+[
+  {"type":"function","function":{"name":"replace_selection","description":"Replace the current selection in the active file.","parameters":{"type":"object","properties":{"text":{"type":"string","description":"The new text for the selection"}},"required":["text"]}}},
+  {"type":"function","function":{"name":"insert_at_cursor","description":"Insert text at the cursor in the active file.","parameters":{"type":"object","properties":{"text":{"type":"string","description":"The text to insert"}},"required":["text"]}}},
+  {"type":"function","function":{"name":"replace_line","description":"Replace the line under the cursor in the active file.","parameters":{"type":"object","properties":{"text":{"type":"string","description":"The new line content"}},"required":["text"]}}},
+  {"type":"function","function":{"name":"read_file","description":"Read a file and return its contents.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"Path of the file to read"}},"required":["path"]}}}
+]
+]]
+
+local function build_context_block(chat)
+	local parts = {}
+	local function add(line)
+		parts[#parts + 1] = line
+	end
+
+	add("# 当前上下文")
+
+	local src = chat.src_pane
+	local src_name = nil
+	if src ~= nil then
+		local ok = pcall(function()
+			src_name = src.Buf:GetName()
+		end)
+		if not ok then
+			src = nil
+			src_name = nil
+		end
+	end
+
+	if src_name then
+		add("当前文件: " .. src_name)
+		add(string.format("光标位置: 第 %d 行, 第 %d 列", src.Cursor.Y + 1, src.Cursor.X + 1))
+		local okline, line = pcall(function()
+			return src.Buf:Line(src.Cursor.Y)
+		end)
+		if okline then
+			add("光标所在行: " .. line)
+		end
+		local selection = selected_text(src)
+		if selection ~= "" then
+			add("选中文本:")
+			add(utf8_prefix(selection, 3000))
+		else
+			add("选中文本: （无）")
+		end
+	end
+
+	if last_search_text ~= "" then
+		add("")
+		add("最近一次搜索结果（查询「" .. last_search_query .. "」）:")
+		add(utf8_prefix(last_search_text, 6000))
+	end
+
+	add("")
+	add("打开的文件:")
+	local budget = option_number("chatcontext", 24000)
+	local used = 0
+	local files = open_buffers()
+	for _, b in ipairs(files) do
+		if used >= budget then
+			break
+		end
+		local name = "?"
+		pcall(function()
+			name = b:GetName()
+		end)
+		local text = buffer_text(b)
+		local cap = budget - used
+		if name == src_name then
+			cap = math.min(cap, 12000)
+		else
+			cap = math.min(cap, 4000)
+		end
+		if #text > cap then
+			text = utf8_prefix(text, cap) .. "\n…（已截断）"
+		end
+		used = used + #text
+		add("")
+		add("### 文件: " .. name .. (name == src_name and "（当前文件）" or ""))
+		add(text)
+	end
+
+	return table.concat(parts, "\n")
+end
+
+-- Keep only the newest turns that fit the token budget. The first message of
+-- the window is always a user message so tool calls stay paired.
+local function window_messages(chat)
+	local budget = math.max(2000, option_number("chattokenbudget", 24000))
+	local msgs = chat.messages
+	local total = 0
+	local start = #msgs + 1
+	for i = #msgs, 1, -1 do
+		local m = msgs[i]
+		local t = est_tokens(m.content or "") + est_tokens(m.reasoning_content or "")
+		if total + t > budget and start <= #msgs then
+			break
+		end
+		total = total + t
+		start = i
+	end
+	while start <= #msgs and msgs[start].role ~= "user" do
+		start = start + 1
+	end
+	local out = {}
+	for i = start, #msgs do
+		out[#out + 1] = msgs[i]
+	end
+	return out
+end
+
+local function build_request(chat)
 	local settings = chat_settings()
 	local msgs = {}
-	local function add(role, content)
-		msgs[#msgs + 1] = string.format('{"role":"%s","content":"%s"}', role, json_escape(content))
+	local function add(x)
+		msgs[#msgs + 1] = x
 	end
-	add("system", context)
-	local start = math.max(1, #chat.messages - 12)
-	for i = start, #chat.messages do
-		add(chat.messages[i].role, chat.messages[i].content)
+
+	add('{"role":"system","content":"' .. json_escape(SYSTEM_PROMPT) .. '"}')
+	for _, m in ipairs(window_messages(chat)) do
+		if m.role == "user" then
+			add('{"role":"user","content":"' .. json_escape(m.content or "") .. '"}')
+		elseif m.role == "assistant" then
+			local parts = { '"role":"assistant"' }
+			local content = m.content or ""
+			if content ~= "" then
+				parts[#parts + 1] = '"content":"' .. json_escape(content) .. '"'
+			else
+				parts[#parts + 1] = '"content":null'
+			end
+			if m.reasoning_content ~= nil and m.reasoning_content ~= "" then
+				parts[#parts + 1] = '"reasoning_content":"' .. json_escape(m.reasoning_content) .. '"'
+			end
+			if type(m.tool_calls) == "table" and #m.tool_calls > 0 then
+				parts[#parts + 1] = '"tool_calls":' .. encode_json(m.tool_calls)
+			end
+			add("{" .. table.concat(parts, ",") .. "}")
+		elseif m.role == "tool" then
+			add('{"role":"tool","tool_call_id":"' .. json_escape(m.tool_call_id or "") .. '","content":"' .. json_escape(m.content or "") .. '"}')
+		end
 	end
 
 	local parts = {
 		'"model":"' .. json_escape(settings.model) .. '"',
 		'"messages":[' .. table.concat(msgs, ",") .. ']',
-		'"stream":false',
+		'"stream":true',
+		'"stream_options":{"include_usage":true}',
+		'"tools":' .. TOOLS_JSON,
 	}
 	if settings.thinking then
 		parts[#parts + 1] = '"thinking":{"type":"enabled"}'
@@ -1296,61 +1533,409 @@ local function chat_body(chat, context)
 	return "{" .. table.concat(parts, ",") .. "}"
 end
 
-local function append_message(chat, role, content)
-	chat.messages[#chat.messages + 1] = { role = role, content = tostr(content) }
-	set_chat_text(chat, render_chat(chat))
+local function merge_usage(chat, usage)
+	if type(usage) ~= "table" then
+		return
+	end
+	local u = chat.usage or {}
+	u.prompt = (u.prompt or 0) + (tonumber(usage.prompt_tokens) or 0)
+	u.completion = (u.completion or 0) + (tonumber(usage.completion_tokens) or 0)
+	u.hit = (u.hit or 0) + (tonumber(usage.prompt_cache_hit_tokens) or 0)
+	u.miss = (u.miss or 0) + (tonumber(usage.prompt_cache_miss_tokens) or 0)
+	local details = usage.completion_tokens_details
+	if type(details) == "table" then
+		u.reasoning = (u.reasoning or 0) + (tonumber(details.reasoning_tokens) or 0)
+	end
+	chat.usage = u
 end
 
-local function finish_chat(chat, output)
-	local status, payload = split_output(output)
-	if status == nil then
-		append_message(chat, "assistant", "（请求没有返回：curl 没有输出）")
-		return
+local function usage_line(chat)
+	local u = chat.usage
+	if type(u) ~= "table" or (u.prompt or 0) == 0 then
+		return nil
 	end
-	if status < 200 or status >= 300 then
-		local detail = error_detail(payload)
-		if detail == "" then
-			detail = "HTTP " .. tostr(status)
-		end
-		append_message(chat, "assistant", "（请求失败：" .. shorten(detail, 300) .. "）")
-		return
+	local pct = 0
+	if (u.prompt or 0) > 0 then
+		pct = math.floor((u.hit or 0) * 100 / u.prompt)
 	end
-	local ok, data = pcall(json_decode, payload)
-	if not ok or type(data) ~= "table" then
-		last_response = payload
-		append_message(chat, "assistant", "（响应不是 JSON，运行 > shinny-raw 查看）")
-		return
-	end
-	last_response = payload
+	return string.format("in %s (cache %d%%) · out %s", fmt_tokens(u.prompt), pct, fmt_tokens(u.completion))
+end
 
-	local content = nil
-	local choices = data.choices
-	if type(choices) == "table" and choices[1] and type(choices[1]) == "table" then
-		local message = choices[1].message
-		if type(message) == "table" then
-			content = message.content
+local function indent_text(text)
+	return (tostr(text):gsub("\n", "\n  "))
+end
+
+local function render_chat(chat, streaming)
+	local out = {}
+	local function add(line)
+		out[#out + 1] = line
+	end
+	local settings = chat_settings()
+	local thinking_label = settings.thinking and ("thinking " .. settings.effort) or "no thinking"
+	local rule = string.rep("─", 30)
+
+	add(rule)
+	add(" shinny chat")
+	local nfiles = #open_buffers()
+	add(" " .. chat.label .. " · " .. (nfiles == 1 and "1 file" or (nfiles .. " files")))
+	add(" " .. settings.model .. " · " .. thinking_label)
+	local usage = usage_line(chat)
+	if usage ~= nil then
+		add(" tokens " .. usage)
+	end
+	add(rule)
+	add("")
+
+	if #chat.messages == 0 and not streaming then
+		add(" 在下方输入栏（>）输入问题，Enter 发送。")
+		add(" 例：解释光标处的代码")
+		add("     把选区改写成更专业的语言 / 把这行改成英文")
+		add("")
+	end
+
+	for _, m in ipairs(chat.messages) do
+		if m.role == "user" then
+			add("› you")
+			add("  " .. indent_text(m.display or m.content or ""))
+			add("")
+		elseif m.role == "assistant" then
+			local content = m.display or m.content or ""
+			if content ~= "" or type(m.tool_calls) ~= "table" or #m.tool_calls == 0 then
+				add("› shinny")
+				if content ~= "" then
+					add("  " .. indent_text(content))
+				end
+				if option_bool("showthinking", false) and m.reasoning_content ~= nil and m.reasoning_content ~= "" then
+					add("  ⋯ thinking")
+					add("    " .. indent_text(shorten(m.reasoning_content, 2000)))
+				end
+				add("")
+			end
+		elseif m.role == "tool" then
+			add("  ⚙ " .. tostr(m.display or "tool"))
+			add("")
 		end
 	end
-	if type(content) ~= "string" or trim(content) == "" then
-		local detail = error_detail(payload)
-		if detail == "" then
-			detail = "没有拿到回复内容"
+
+	if streaming then
+		add("› shinny")
+		add("  ")
+	else
+		add(rule)
+		add(" Enter 发送 · Alt-i 聚焦 · Esc 停止 · Ctrl-Z 撤销")
+	end
+	return table.concat(out, "\n")
+end
+
+local function chat_key()
+	local env = trim(os.Getenv("DEEPSEEK_API_KEY"))
+	if env ~= "" then
+		return env
+	end
+	return trim(tostr(option("deepseekkey", "")))
+end
+
+local function execute_tool(chat, call)
+	local fn = call["function"] or {}
+	local name = tostr(fn.name)
+	local args = {}
+	pcall(function()
+		args = json_decode(tostr(fn.arguments))
+	end)
+	if type(args) ~= "table" then
+		args = {}
+	end
+
+	if name == "replace_selection" or name == "insert_at_cursor" or name == "replace_line" then
+		local target = "selection"
+		if name == "insert_at_cursor" then
+			target = "cursor"
+		elseif name == "replace_line" then
+			target = "line"
 		end
-		append_message(chat, "assistant", "（" .. shorten(detail, 300) .. "）")
+		local ok, note = apply_edit(chat, target, tostr(args.text or ""))
+		local result = ok and tostr(note) or ("error: " .. tostr(note))
+		return result, result
+	elseif name == "read_file" then
+		local path = trim(tostr(args.path or ""))
+		if path == "" then
+			return "error: missing path", "缺少 path"
+		end
+		local ok, data = pcall(ioutil.ReadFile, path)
+		if not ok or data == nil then
+			return "error: cannot read " .. path, "读取失败"
+		end
+		local text = ""
+		pcall(function()
+			text = fmt.Sprintf("%s", data)
+		end)
+		return utf8_prefix(tostr(text), 8000), "已读取 " .. shorten(path, 40)
+	end
+	return "error: unknown tool " .. name, "未知工具"
+end
+
+local start_request
+local handle_stream_chunk
+local handle_stream_exit
+local finalize_cancel
+
+local STREAM_CMD = 'curl -sS -N --max-time 180 -X POST "$SHINNY_ENDPOINT"'
+	.. ' -H "Content-Type: application/json"'
+	.. ' -H "Authorization: Bearer $SHINNY_KEY"'
+	.. ' --data-binary "$SHINNY_BODY"'
+	.. ' -w "\\n' .. STATUS_MARKER .. ':%{http_code}"'
+
+local function accumulate_tool_calls(chat, list)
+	for _, d in ipairs(list) do
+		local idx = (tonumber(d.index) or 0) + 1
+		local tc = chat.stream.tools[idx]
+		if tc == nil then
+			tc = { id = "", type = "function", ["function"] = { name = "", arguments = "" } }
+			chat.stream.tools[idx] = tc
+		end
+		if type(d.id) == "string" then
+			tc.id = d.id
+		end
+		if type(d.type) == "string" then
+			tc.type = d.type
+		end
+		local fn = d["function"]
+		if type(fn) == "table" then
+			if type(fn.name) == "string" then
+				tc["function"].name = tc["function"].name .. fn.name
+			end
+			if type(fn.arguments) == "string" then
+				tc["function"].arguments = tc["function"].arguments .. fn.arguments
+			end
+		end
+	end
+end
+
+function start_request(chat)
+	local key = chat_key()
+	if key == "" then
+		chat.streaming = false
+		micro.InfoBar():Error("shinny: 没有 DeepSeek key — 运行 > set shinny.deepseekkey <key>")
+		return
+	end
+	local body = build_request(chat)
+	local url = trim(tostr(option("chaturl", DEFAULT_DS_CHAT)))
+	if url == "" then
+		url = DEFAULT_DS_CHAT
+	end
+
+	chat.stream = { content = "", reasoning = "", tools = {}, usage = nil }
+	chat.streaming = true
+	chat.canceled = false
+	chat.sbuf = ""
+	chat.raw = ""
+	chat.think_bucket = 0
+	chat.text = render_chat(chat, true)
+	replace_chat_text(chat, chat.text)
+
+	os.Setenv("SHINNY_ENDPOINT", url)
+	os.Setenv("SHINNY_KEY", key)
+	os.Setenv("SHINNY_BODY", body)
+	micro.InfoBar():Message("shinny: streaming…")
+
+	local ok, job = pcall(shell.JobStart, STREAM_CMD, function(chunk)
+		handle_stream_chunk(chat, chunk)
+	end, nil, function(output)
+		os.Setenv("SHINNY_KEY", "")
+		os.Setenv("SHINNY_BODY", "")
+		handle_stream_exit(chat, output)
+	end)
+
+	if not ok then
+		chat.streaming = false
+		os.Setenv("SHINNY_KEY", "")
+		os.Setenv("SHINNY_BODY", "")
+		chat.messages[#chat.messages + 1] = {
+			role = "assistant",
+			content = "（无法启动请求：" .. shorten(collapse(tostr(job)), 300) .. "）",
+			display = "（无法启动请求：" .. shorten(collapse(tostr(job)), 300) .. "）",
+		}
+		replace_chat_text(chat, render_chat(chat, false))
+		return
+	end
+	chat.job = job
+end
+
+function handle_stream_chunk(chat, chunk)
+	chat.sbuf = (chat.sbuf or "") .. tostr(chunk)
+	chat.raw = (chat.raw or "") .. tostr(chunk)
+	while true do
+		local nl = chat.sbuf:find("\n", 1, true)
+		if not nl then
+			break
+		end
+		local line = chat.sbuf:sub(1, nl - 1)
+		chat.sbuf = chat.sbuf:sub(nl + 1)
+		line = line:gsub("\r$", "")
+		if line:sub(1, 5) == "data:" then
+			local payload = trim(line:sub(6))
+			if payload == "[DONE]" then
+				chat.stream.done = true
+			elseif payload ~= "" then
+				local ok, data = pcall(json_decode, payload)
+				if ok and type(data) == "table" then
+					if type(data.usage) == "table" then
+						chat.stream.usage = data.usage
+					end
+					local choices = data.choices
+					if type(choices) == "table" and type(choices[1]) == "table" then
+						local delta = choices[1].delta
+						if type(delta) == "table" then
+							if type(delta.reasoning_content) == "string" and delta.reasoning_content ~= "" then
+								chat.stream.reasoning = chat.stream.reasoning .. delta.reasoning_content
+								local bucket = math.floor(#chat.stream.reasoning / 200)
+								if bucket ~= chat.think_bucket then
+									chat.think_bucket = bucket
+									micro.InfoBar():Message("shinny: thinking… " .. tostring(#chat.stream.reasoning))
+								end
+							end
+							if type(delta.content) == "string" and delta.content ~= "" then
+								chat.stream.content = chat.stream.content .. delta.content
+								stream_append(chat, delta.content)
+							end
+							if type(delta.tool_calls) == "table" then
+								accumulate_tool_calls(chat, delta.tool_calls)
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+function finalize_cancel(chat)
+	local partial = chat.stream and chat.stream.content or ""
+	local content = partial ~= "" and (partial .. "\n\n（已停止）") or "（已停止）"
+	chat.messages[#chat.messages + 1] = {
+		role = "assistant",
+		content = content,
+		display = content,
+		reasoning_content = chat.stream and chat.stream.reasoning or nil,
+	}
+	save_chat(chat)
+	replace_chat_text(chat, render_chat(chat, false))
+	micro.InfoBar():Message("shinny: 已停止")
+end
+
+function handle_stream_exit(chat, output)
+	chat.job = nil
+	if not chat.streaming then
+		return
+	end
+	local status = nil
+	if output ~= nil then
+		local m = tostr(output):match(STATUS_MARKER .. ":(%d+)")
+		status = tonumber(m or "")
+	end
+	local partial = chat.stream.content or ""
+	local tools = chat.stream.tools or {}
+	chat.streaming = false
+
+	if chat.canceled then
+		finalize_cancel(chat)
 		return
 	end
 
-	local cleaned, notes = apply_edits(chat, content)
-	local shown = cleaned
+	local retryable = (status == nil or status == 0 or status == 429 or (status ~= nil and status >= 500))
+	if retryable and partial == "" and #tools == 0 then
+		chat.retries = (chat.retries or 0) + 1
+		if chat.retries <= 2 then
+			micro.InfoBar():Message(string.format("shinny: 请求失败，重试 %d/2…", chat.retries))
+			micro.After(1200000000 * chat.retries, function()
+				if not chat.streaming then
+					start_request(chat)
+				end
+			end)
+			return
+		end
+	end
+
+	if (status == nil or status < 200 or status >= 300) and partial == "" and #tools == 0 then
+		local detail = error_detail(chat.raw or "")
+		if detail == "" then
+			detail = status ~= nil and ("HTTP " .. tostr(status)) or "流式响应为空"
+		end
+		chat.messages[#chat.messages + 1] = {
+			role = "assistant",
+			content = "（请求失败：" .. shorten(detail, 300) .. "）",
+			display = "（请求失败：" .. shorten(detail, 300) .. "）",
+		}
+		save_chat(chat)
+		replace_chat_text(chat, render_chat(chat, false))
+		return
+	end
+
+	chat.retries = 0
+	merge_usage(chat, chat.stream.usage)
+
+	if #tools > 0 then
+		chat.messages[#chat.messages + 1] = {
+			role = "assistant",
+			content = partial,
+			display = partial,
+			reasoning_content = chat.stream.reasoning,
+			tool_calls = tools,
+		}
+		for _, call in ipairs(tools) do
+			local name = tostr((call["function"] or {}).name)
+			local result, note = execute_tool(chat, call)
+			chat.messages[#chat.messages + 1] = {
+				role = "tool",
+				tool_call_id = call.id,
+				content = result,
+				display = name .. " · " .. note,
+			}
+		end
+		save_chat(chat)
+		chat.round = (chat.round or 0) + 1
+		replace_chat_text(chat, render_chat(chat, false))
+		if chat.round >= 4 then
+			chat.messages[#chat.messages + 1] = {
+				role = "assistant",
+				content = "（工具调用次数达到上限）",
+				display = "（工具调用次数达到上限）",
+			}
+			save_chat(chat)
+			replace_chat_text(chat, render_chat(chat, false))
+			return
+		end
+		start_request(chat)
+		return
+	end
+
+	local content = partial
+	local notes = {}
+	if content ~= "" then
+		local cleaned
+		cleaned, notes = apply_edits(chat, content)
+		content = cleaned
+	end
+	if content == "" and (chat.stream.reasoning or "") ~= "" then
+		content = "（只返回了思考内容，没有最终回答）"
+	end
+	local display = content
 	if #notes > 0 then
-		shown = (shown ~= "" and shown .. "\n\n" or "") .. "▸ 已应用到文件：" .. table.concat(notes, "；")
+		display = (display ~= "" and display .. "\n\n" or "") .. "▸ 已应用到文件：" .. table.concat(notes, "；")
 	end
-	append_message(chat, "assistant", shown)
-	micro.InfoBar():Message("shinny: 回复完成")
+	chat.messages[#chat.messages + 1] = {
+		role = "assistant",
+		content = content,
+		display = display,
+		reasoning_content = chat.stream.reasoning,
+	}
+	save_chat(chat)
+	replace_chat_text(chat, render_chat(chat, false))
+	micro.InfoBar():Message("shinny: 完成")
 end
 
 local function send_chat(chat, question)
-	if chat.busy then
+	if chat.streaming then
 		micro.InfoBar():Error("shinny: 上一个问题还在处理中")
 		return false
 	end
@@ -1360,38 +1945,27 @@ local function send_chat(chat, question)
 		return false
 	end
 
-	chat.busy = true
-	append_message(chat, "user", question)
-
-	local body = chat_body(chat, build_context(chat))
-	local url = trim(tostr(option("chaturl", DEFAULT_DS_CHAT)))
-	if url == "" then
-		url = DEFAULT_DS_CHAT
-	end
-
-	os.Setenv("SHINNY_ENDPOINT", url)
-	os.Setenv("SHINNY_KEY", key)
-	os.Setenv("SHINNY_BODY", body)
-	micro.InfoBar():Message("shinny: thinking…")
-
-	local ok, err = pcall(shell.JobStart, curl_cmd(120), nil, nil, function(output)
-		os.Setenv("SHINNY_KEY", "")
-		os.Setenv("SHINNY_BODY", "")
-		chat.busy = false
-		local ran, problem = pcall(finish_chat, chat, output)
-		if not ran then
-			append_message(chat, "assistant", "（内部错误：" .. shorten(collapse(problem), 300) .. "）")
-		end
-	end)
-
-	if not ok then
-		chat.busy = false
-		os.Setenv("SHINNY_KEY", "")
-		os.Setenv("SHINNY_BODY", "")
-		append_message(chat, "assistant", "（无法启动请求：" .. shorten(collapse(err), 300) .. "）")
-		return true
-	end
+	local context = build_context_block(chat)
+	local api_content = context .. "\n\n[用户问题]\n" .. question
+	chat.messages[#chat.messages + 1] = {
+		role = "user",
+		content = api_content,
+		display = question,
+	}
+	chat.round = 0
+	chat.retries = 0
+	chat.canceled = false
+	save_chat(chat)
+	start_request(chat)
 	return true
+end
+
+local function chat_label(name)
+	name = tostr(name)
+	if name == "" or name == "No name" then
+		return "untitled"
+	end
+	return name:match("([^/\\]+)$") or name
 end
 
 local function reset_input(chat)
@@ -1469,7 +2043,8 @@ local function ensure_chat_panes(bp, chat)
 	end
 	set_filetype(chat.buf, "shinnychat", true)
 	set_filetype(chat.ibuf, "shinnyinput", true)
-	set_chat_text(chat, render_chat(chat))
+	chat.text = chat.text or ""
+	replace_chat_text(chat, render_chat(chat, chat.streaming))
 	focus_input(chat)
 end
 
@@ -1481,7 +2056,7 @@ function preInsertNewline(bp)
 	if chat == nil then
 		return true
 	end
-	if chat.busy then
+	if chat.streaming then
 		micro.InfoBar():Error("shinny: 上一个问题还在处理中")
 		return false
 	end
@@ -1494,6 +2069,36 @@ function preInsertNewline(bp)
 		reset_input(chat)
 	end
 	return false
+end
+
+local pad_after_cancel
+
+function preEscape(bp)
+	if bp == nil then
+		return true
+	end
+	local name = tostr(bp.Buf:GetName())
+	local chat = chats[name] or chats_by_input[name]
+	if chat ~= nil and chat.streaming then
+		chat.canceled = true
+		if chat.job ~= nil then
+			pcall(shell.JobStop, chat.job)
+		end
+		micro.After(400000000, function()
+			if chat.streaming and chat.canceled then
+				pad_after_cancel(chat)
+			end
+		end)
+		return false
+	end
+	return true
+end
+
+function pad_after_cancel(chat)
+	if chat.streaming then
+		chat.streaming = false
+		finalize_cancel(chat)
+	end
 end
 
 local function chat_for(bp)
@@ -1519,6 +2124,7 @@ local function chat_for(bp)
 			i = i + 1
 		until chat == nil or chat.key == key
 	end
+
 	local input_name = CHAT_INPUT_PREFIX .. chat_name:sub(#CHAT_PREFIX + 1)
 	if chat == nil then
 		chat = {
@@ -1527,15 +2133,19 @@ local function chat_for(bp)
 			key = key,
 			label = label,
 			messages = {},
+			usage = {},
 			buf = nil,
 			pane = nil,
 			ibuf = nil,
 			ipane = nil,
 			src_pane = bp,
-			busy = false,
+			streaming = false,
 			text = "",
+			round = 0,
+			retries = 0,
 		}
 		chats[chat_name] = chat
+		load_chat(chat)
 	else
 		chat.src_pane = bp
 		if chat.input_name == nil then
@@ -1565,6 +2175,7 @@ local function render_help()
 	add("")
 	add("- `Alt-s` — 搜索选区（等同 `> shinny`）")
 	add("- `Alt-i` — 打开 / 聚焦当前文件的 chat 输入栏")
+	add("- `Esc` — 生成过程中停止")
 	add("")
 	add("## 搜索")
 	add("")
@@ -1576,8 +2187,11 @@ local function render_help()
 	add("")
 	add("- `Alt-i` 打开该文件专属的分屏：上方对话记录，下方 `>` 输入栏")
 	add("- 在输入栏输入问题，`Enter` 发送；再按 `Alt-i` 回到输入栏")
+	add("- 流式输出；回答和思考过程分开处理，思考内容可选显示")
 	add("- Chat 能看到所有打开的文件、光标位置、选区和最近一次搜索结果")
-	add("- 回答里的修改会直接写入文件（`Ctrl-Z` 可撤销）")
+	add("- 模型通过 function calling 直接修改文件（`Ctrl-Z` 可撤销）")
+	add("- 会话按文件保存到 `~/.config/micro/shinny/chats`，重启可恢复")
+	add("- 底部会显示 token 用量和 cache 命中率")
 	add("")
 	add("## 命令")
 	add("")
@@ -1589,6 +2203,9 @@ local function render_help()
 	add("- `shinny-model [name]` — 查看/切换模型")
 	add("- `shinny-thinking [on|off]` — 查看/切换思考模式")
 	add("- `shinny-effort [low|high|max]` — 查看/设置思考强度")
+	add("- `shinny-chat-new` — 清空当前文件的会话")
+	add("- `shinny-usage` — 显示 token / cache 用量")
+	add("- `shinny-chat-stop` — 停止正在生成的回复")
 	add("- `shinny-raw` — 打开上一次请求的原始响应")
 	add("- `shinny-help` — 显示这份帮助")
 	add("")
@@ -1602,12 +2219,13 @@ local function render_help()
 	add("- Tavily key：" .. (api_key("tavily") ~= "" and "已配置" or "未配置"))
 	add("- DeepSeek key：" .. (api_key("deepseek") ~= "" and "已配置" or "未配置"))
 	add("- 结果数量：`" .. tostr(math.floor(option_number("maxresults", 5))) .. "`")
+	add("- 上下文预算：`" .. tostr(math.floor(option_number("chattokenbudget", 24000))) .. "` tokens")
 	add("")
 	add("## 常用选项")
 	add("")
 	add("`shinny.prefix`、`shinny.suffix`、`shinny.backend`、`shinny.apikey`、")
 	add("`shinny.deepseekkey`、`shinny.chatmodel`、`shinny.thinking`、`shinny.effort`、")
-	add("`shinny.maxresults`、`shinny.chatcontext`")
+	add("`shinny.maxresults`、`shinny.chatcontext`、`shinny.chattokenbudget`、`shinny.showthinking`")
 	add("")
 	add("完整文档：`> help shinny`")
 	return table.concat(lines, "\n") .. "\n"
@@ -1743,6 +2361,62 @@ function shinny_effort(bp, args)
 	micro.InfoBar():Message("shinny: effort = " .. value)
 end
 
+local function chat_at(bp)
+	if bp == nil then
+		return nil
+	end
+	local name = tostr(bp.Buf:GetName())
+	if is_chat_name(name) or is_input_name(name) then
+		return chats[name] or chats_by_input[name]
+	end
+	return chat_for(bp)
+end
+
+function shinny_chat_new(bp, args)
+	local chat = chat_at(bp)
+	if chat == nil then
+		micro.InfoBar():Error("shinny: 没有活动 chat")
+		return
+	end
+	if chat.streaming and chat.job ~= nil then
+		pcall(shell.JobStop, chat.job)
+		chat.streaming = false
+	end
+	chat.messages = {}
+	chat.usage = {}
+	chat.round = 0
+	pcall(os.Remove, chat_file(chat))
+	replace_chat_text(chat, render_chat(chat, false))
+	micro.InfoBar():Message("shinny: 新会话")
+end
+
+function shinny_usage(bp, args)
+	local chat = chat_at(bp)
+	if chat == nil then
+		micro.InfoBar():Error("shinny: 没有活动 chat")
+		return
+	end
+	local line = usage_line(chat)
+	if line == nil then
+		micro.InfoBar():Message("shinny: 还没有用量数据")
+		return
+	end
+	micro.InfoBar():Message("shinny: " .. line)
+end
+
+function shinny_chat_stop(bp, args)
+	local chat = chat_at(bp)
+	if chat == nil or not chat.streaming then
+		micro.InfoBar():Message("shinny: 当前没有正在生成的回复")
+		return
+	end
+	chat.canceled = true
+	if chat.job ~= nil then
+		pcall(shell.JobStop, chat.job)
+	end
+	micro.InfoBar():Message("shinny: 正在停止…")
+end
+
 function shinny_chat(bp, args)
 	if bp == nil then
 		micro.InfoBar():Error("shinny: 没有活动窗格")
@@ -1792,6 +2466,8 @@ function init()
 	config.RegisterGlobalOption("shinny", "thinking", true)
 	config.RegisterGlobalOption("shinny", "effort", DEFAULT_EFFORT)
 	config.RegisterGlobalOption("shinny", "chatcontext", 24000)
+	config.RegisterGlobalOption("shinny", "chattokenbudget", 24000)
+	config.RegisterGlobalOption("shinny", "showthinking", false)
 
 	apply_state()
 
@@ -1802,6 +2478,9 @@ function init()
 	config.MakeCommand("shinny-backend", shinny_backend, config.NoComplete)
 	config.MakeCommand("shinny-chat", shinny_chat, config.NoComplete)
 	config.MakeCommand("shinny-help", shinny_help, config.NoComplete)
+	config.MakeCommand("shinny-chat-new", shinny_chat_new, config.NoComplete)
+	config.MakeCommand("shinny-usage", shinny_usage, config.NoComplete)
+	config.MakeCommand("shinny-chat-stop", shinny_chat_stop, config.NoComplete)
 	config.MakeCommand("shinny-model", shinny_model, config.NoComplete)
 	config.MakeCommand("shinny-thinking", shinny_thinking, config.NoComplete)
 	config.MakeCommand("shinny-effort", shinny_effort, config.NoComplete)

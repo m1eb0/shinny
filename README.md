@@ -71,13 +71,11 @@ Chat 的上下文包括：
 
 可以直接说「解释光标处的代码」「把选区改写成更专业的语言」「把这行改成英文」。
 
-默认模型 `deepseek-flash`、开启思考模式（effort `high`）；用 `shinny-model` / `shinny-thinking` / `shinny-effort` 调整，当前配置显示在 chat 顶部。模型用 `<<<SHINNY_EDIT selection>>>…<<<SHINNY_EDIT_END>>>` 描述修改，插件立即写入文件：
+默认模型 `deepseek-flash`、开启思考模式（effort `high`）；用 `shinny-model` / `shinny-thinking` / `shinny-effort` 调整，当前配置显示在 chat 顶部。
 
-- `selection`：替换当前选区
-- `cursor`：插入到光标处
-- `line`：替换光标所在行
+Chat 是流式的：回答边生成边显示，`Esc` 停止；思考内容单独保存（`shinny.showthinking` 可显示）。模型通过 function calling 调用 `replace_selection` / `insert_at_cursor` / `replace_line` / `read_file` 修改文件，写入走 micro 的 buffer 事件，`Ctrl-Z` 可撤销。
 
-修改通过 micro 的 buffer 事件写入，所以 `Ctrl-Z` 可以撤销。
+会话按文件持久化在 `~/.config/micro/shinny/chats/`，重启 micro 能恢复；顶部显示 token 用量和 cache 命中率，`> shinny-usage` 查看累计值，`> shinny-chat-new` 清空会话。上下文按 `shinny.chattokenbudget`（token 估算）裁剪；system prompt 固定、易变上下文注入最新一条 user 消息，以尽量命中 DeepSeek 的前缀缓存。
 
 ## 命令与选项
 
@@ -93,6 +91,9 @@ Chat 的上下文包括：
 | `shinny-effort [low\|high\|max]` | 查看/设置思考强度 |
 | `shinny-raw` | 查看上一次请求的原始响应 |
 | `shinny-help` | 显示命令、快捷键、选项和当前设置 |
+| `shinny-chat-new` | 清空当前文件的会话 |
+| `shinny-usage` | 显示 token / cache 用量 |
+| `shinny-chat-stop` | 停止生成（同 `Esc`） |
 
 | 选项 | 默认值 |
 | --- | --- |
@@ -104,6 +105,8 @@ Chat 的上下文包括：
 | `shinny.chatmodel` | `deepseek-flash` |
 | `shinny.thinking` / `shinny.effort` | `true` / `high` |
 | `shinny.chatcontext` | `24000` |
+| `shinny.chattokenbudget` | `24000` |
+| `shinny.showthinking` | `false` |
 | `shinny.endpoint` / `shinny.deepseektoolsurl` / `shinny.chaturl` | 官方地址 |
 
 ## 外观
@@ -112,14 +115,15 @@ chat 分屏、输入栏、搜索结果和帮助页都带语法高亮（角色、
 
 ## 实现说明
 
-- 搜索和 chat 都通过 `micro/shell.JobStart` 在后台跑 `curl`，micro 不会卡住；query 和请求体通过环境变量传递，选区文字不需要 shell 转义。
-- 响应由插件自带的小型 JSON 解码器解析（micro 的 Lua 没有 JSON 库），并针对 gopher-lua 的 `table.concat` 限制做了分批拼接。
-- Chat 上下文从 `micro.Tabs()` 枚举所有 pane 的 buffer 拼装，写入则调用 `Buffer:Insert`/`Buffer:Remove`，因此进入 micro 的 undo 栈。
+- 搜索和 chat 都通过 `micro/shell.JobStart` 在后台跑 `curl`；chat 用 SSE 流式读取，`content` / `reasoning_content` / `tool_calls` 增量拼装。
+- Chat 使用 DeepSeek 的 function calling：多轮 tool loop 直到模型给出最终回答；带 `tools` 时按文档回传历史 `reasoning_content`。
+- 响应由插件自带的小型 JSON 解码器解析（micro 的 Lua 没有 JSON 库），并针对 gopher-lua 的 `table.concat` 限制做了分批拼接；会话 JSON 由插件自己编码。
+- 上下文从 `micro.Tabs()` 枚举所有 pane 的 buffer 拼装，并做 token 估算（CJK 感知）与历史裁剪；写入调用 `Buffer:Insert`/`Buffer:Remove`，进入 micro 的 undo 栈。
 
 ## 开发
 
 ```sh
-make test    # 18 个 headless 测试 + 2 个走本地 mock 的端到端测试
+make test    # 21 个 headless 测试 + 2 个走本地 mock 的端到端测试
 ```
 
 `tests/run.lua` 用假的 micro API 跑逻辑；`tests/integration.sh` 启动

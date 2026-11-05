@@ -20,7 +20,11 @@ local state = {
 	prompts = {},
 	split_count = 0,
 	search_output = "",
-	chat_output = "",
+	chat_sse = "",
+	chat_queue = {},
+	chat_bodies = {},
+	afters = {},
+	mkdirs = {},
 	real = integration ~= nil,
 }
 
@@ -218,6 +222,30 @@ local function shell_quote(s)
 	return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
 end
 
+local function run_command_stream(cmd, on_stdout)
+	local wrapped = string.format(
+		"SHINNY_ENDPOINT=%s SHINNY_KEY=%s SHINNY_BODY=%s sh -c %s 2>&1",
+		shell_quote(state.env.SHINNY_ENDPOINT or ""),
+		shell_quote(state.env.SHINNY_KEY or ""),
+		shell_quote(state.env.SHINNY_BODY or ""),
+		shell_quote(cmd)
+	)
+	local pipe = assert(io.popen(wrapped, "r"))
+	local parts = {}
+	while true do
+		local chunk = pipe:read(4096)
+		if not chunk then
+			break
+		end
+		parts[#parts + 1] = chunk
+		if on_stdout then
+			on_stdout(chunk)
+		end
+	end
+	pipe:close()
+	return table.concat(parts)
+end
+
 local function run_command(cmd)
 	local wrapped = string.format(
 		"SHINNY_ENDPOINT=%s SHINNY_KEY=%s SHINNY_BODY=%s sh -c %s 2>&1",
@@ -251,6 +279,9 @@ packages["micro"] = function()
 		end,
 		CurPane = function()
 			return state.pane
+		end,
+		After = function(ms, fn)
+			state.afters[#state.afters + 1] = { ms = ms, fn = fn }
 		end,
 		Tabs = function()
 			local tab = { Panes = state.panes }
@@ -303,7 +334,7 @@ end
 
 packages["micro/shell"] = function()
 	return {
-		JobStart = function(cmd, _so, _se, on_exit)
+		JobStart = function(cmd, on_stdout, _se, on_exit)
 			state.last_cmd = cmd
 			state.job_env = {
 				ENDPOINT = state.env.SHINNY_ENDPOINT,
@@ -313,18 +344,30 @@ packages["micro/shell"] = function()
 			state.job_kind = "search"
 			if tostring(state.env.SHINNY_ENDPOINT):find("chat", 1, true) then
 				state.job_kind = "chat"
+				state.chat_bodies[#state.chat_bodies + 1] = state.env.SHINNY_BODY
 			end
 			state.pending = function()
-				local out
 				if state.real then
-					out = run_command(cmd)
-				else
-					out = state.job_kind == "chat" and state.chat_output or state.search_output
+					local out = run_command_stream(cmd, on_stdout)
+					on_exit(out)
+					return
 				end
-				on_exit(out)
+				if state.job_kind == "chat" then
+					local sse = table.remove(state.chat_queue, 1)
+					if sse == nil then
+						sse = state.chat_sse
+					end
+					for line in (sse .. "\n"):gmatch("(.-\n)") do
+						on_stdout(line)
+					end
+					on_exit(sse .. "\n__SHINNY_STATUS__:200")
+				else
+					on_exit(state.search_output)
+				end
 			end
 			return {}
 		end,
+		JobStop = function() end,
 	}
 end
 
@@ -346,6 +389,12 @@ packages["os"] = function()
 		end,
 		Setenv = function(name, value)
 			state.env[name] = value
+		end,
+		MkdirAll = function(path, mode)
+			state.mkdirs[path] = mode
+		end,
+		Remove = function(path)
+			state.files[path] = nil
 		end,
 	}
 end
@@ -398,10 +447,12 @@ dofile("shinny.lua")
 -- ---------------------------------------------------------------------------
 
 local function flush()
-	local pending = state.pending
-	state.pending = nil
-	if pending then
+	local guard = 0
+	while state.pending and guard < 20 do
+		local pending = state.pending
+		state.pending = nil
 		pending()
+		guard = guard + 1
 	end
 end
 
@@ -418,7 +469,9 @@ local function reset()
 	state.panes = {}
 	state.split_count = 0
 	state.search_output = ""
-	state.chat_output = ""
+	state.chat_sse = ""
+	state.chat_queue = {}
+	state.chat_bodies = {}
 	state.env = {}
 	state.pane = nil
 	state.real = false
@@ -497,10 +550,42 @@ local DS_SAMPLE = [[
 __SHINNY_STATUS__:200
 ]]
 
-local CHAT_EDIT = [[
-{"choices":[{"message":{"content":"好的，我改写了选区。\n<<<SHINNY_EDIT selection>>>\n重写后的专业表述。\n<<<SHINNY_EDIT_END>>>"}}]}
-__SHINNY_STATUS__:200
-]]
+local CHAT_EDIT = 'data: {"choices":[{"delta":{"reasoning_content":"想一想。"}}]}\n\n'
+	.. 'data: {"choices":[{"delta":{"content":"好的，我改写了选区。\\n<<<SHINNY_EDIT selection>>>\\n重写后的专业表述。\\n<<<SHINNY_EDIT_END>>>"}}]}\n\n'
+	.. 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+	.. 'data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":12,"prompt_cache_hit_tokens":40,"prompt_cache_miss_tokens":60}}\n\n'
+	.. 'data: [DONE]\n\n'
+
+local CHAT_TEXT = 'data: {"choices":[{"delta":{"content":"你好，这是流式回答。"}}]}\n\n'
+	.. 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+	.. 'data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":12,"prompt_cache_hit_tokens":40,"prompt_cache_miss_tokens":60}}\n\n'
+	.. 'data: [DONE]\n\n'
+
+local TOOL_SSE = 'data: {"choices":[{"delta":{"reasoning_content":"需要调用工具。"}}]}\n\n'
+	.. 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_mock","type":"function","function":{"name":"replace_selection","arguments":""}}]}}]}\n\n'
+	.. 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"text\\":\\"工具改写后的文本\\"}"}}]}}]}\n\n'
+	.. 'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n'
+	.. 'data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":12,"prompt_cache_hit_tokens":40,"prompt_cache_miss_tokens":60}}\n\n'
+	.. 'data: [DONE]\n\n'
+
+local FINAL_SSE = 'data: {"choices":[{"delta":{"content":"已完成修改。"}}]}\n\n'
+	.. 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+	.. 'data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":12,"prompt_cache_hit_tokens":40,"prompt_cache_miss_tokens":60}}\n\n'
+	.. 'data: [DONE]\n\n'
+
+
+
+local function jesc(text)
+	return (tostring(text):gsub("\\", "\\\\"):gsub('"', '\\"')
+		:gsub("\n", "\\n"):gsub("\r", "\\r"):gsub("\t", "\\t"))
+end
+
+local function sse_text(text)
+	return 'data: {"choices":[{"delta":{"content":"' .. jesc(text) .. '"}}]}\n\n'
+		.. 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+		.. 'data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":12,"prompt_cache_hit_tokens":40,"prompt_cache_miss_tokens":60}}\n\n'
+		.. 'data: [DONE]\n\n'
+end
 
 local function setup_search(backend)
 	reset()
@@ -518,7 +603,9 @@ local function setup_search(backend)
 	state.options["shinny.chatmodel"] = "deepseek-flash"
 	state.options["shinny.thinking"] = true
 	state.options["shinny.effort"] = "high"
-	local bp = new_pane(new_buffer("NVME集群\n", "/tmp/notes.md"))
+	local seq = (state.test_seq or 0) + 1
+	state.test_seq = seq
+	local bp = new_pane(new_buffer("NVME集群\n", "/tmp/notes" .. seq .. ".md"))
 	bp.Cursor.sel = { { X = 0, Y = 0 }, { X = 10, Y = 0 } }
 	state.pane = bp
 	return bp
@@ -622,7 +709,7 @@ end)
 
 test("Enter in the input pane sends the question and applies a rewrite", function()
 	local bp = setup_search("tavily")
-	state.chat_output = CHAT_EDIT
+	state.chat_sse = CHAT_EDIT
 	run(shinny_chat, bp, nil)
 	assert_true(preInsertNewline(input_pane()) == false, "Enter should be consumed in the input")
 	assert_contains(last_message(), "输入问题")
@@ -648,12 +735,12 @@ test("chat applies cursor insert and line replacement", function()
 	bp.Cursor.X, bp.Cursor.Y = 2, 0
 	run(shinny_chat, bp, nil)
 
-	state.chat_output = '{"choices":[{"message":{"content":"<<<SHINNY_EDIT cursor>>>\n插入的内容\n<<<SHINNY_EDIT_END>>>"}}]}\n__SHINNY_STATUS__:200'
+	state.chat_sse = sse_text("<<<SHINNY_EDIT cursor>>>\n插入的内容\n<<<SHINNY_EDIT_END>>>")
 	ask("在光标处插入解释")
 	assert_contains(bp.Buf:text(), "NV插入的内容ME集群")
 
 	bp.Cursor.X, bp.Cursor.Y = 0, 1
-	state.chat_output = '{"choices":[{"message":{"content":"<<<SHINNY_EDIT line>>>\nThis line has been translated.\n<<<SHINNY_EDIT_END>>>"}}]}\n__SHINNY_STATUS__:200'
+	state.chat_sse = sse_text("<<<SHINNY_EDIT line>>>\nThis line has been translated.\n<<<SHINNY_EDIT_END>>>")
 	ask("把这行改成英文")
 	assert_contains(bp.Buf:text(), "This line has been translated.")
 end)
@@ -662,7 +749,7 @@ test("chat sees other open files", function()
 	local bp = setup_search("tavily")
 	local other = new_buffer("OTHER FILE CONTENT\n", "/tmp/other.md")
 	new_pane(other)
-	state.chat_output = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
+	state.chat_sse = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
 	run(shinny_chat, bp, nil)
 	ask("看看别的文件")
 
@@ -689,7 +776,7 @@ end)
 
 test("sends the model and thinking settings", function()
 	local bp = setup_search("tavily")
-	state.chat_output = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
+	state.chat_sse = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
 	run(shinny_chat, bp, nil)
 	ask("你好")
 
@@ -705,7 +792,7 @@ test("shinny-model switches the model and persists it", function()
 	assert_true(state.options["shinny.chatmodel"] == "deepseek-v4-pro", "model option")
 	assert_contains(state.files["/cfg/shinny.json"], '"model": "deepseek-v4-pro"')
 
-	state.chat_output = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
+	state.chat_sse = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
 	run(shinny_chat, bp, nil)
 	ask("你好")
 	assert_contains(state.job_env.BODY, '"model":"deepseek-v4-pro"')
@@ -716,7 +803,7 @@ test("shinny-thinking off disables thinking and effort", function()
 	state.commands["shinny-thinking"](bp, { "off" })
 	assert_true(state.options["shinny.thinking"] == "false" or state.options["shinny.thinking"] == false, "thinking option")
 
-	state.chat_output = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
+	state.chat_sse = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
 	run(shinny_chat, bp, nil)
 	ask("你好")
 	assert_contains(state.job_env.BODY, '"thinking":{"type":"disabled"}')
@@ -729,7 +816,7 @@ test("shinny-effort validates and switches effort", function()
 	state.commands["shinny-effort"](bp, { "max" })
 	assert_true(state.options["shinny.effort"] == "max", "effort option")
 
-	state.chat_output = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
+	state.chat_sse = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
 	run(shinny_chat, bp, nil)
 	ask("你好")
 	assert_contains(state.job_env.BODY, '"reasoning_effort":"max"')
@@ -751,8 +838,9 @@ end)
 
 test("chat buffers get their syntax filetypes", function()
 	local bp = setup_search("tavily")
-	state.chat_output = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
+	state.chat_sse = sse_text("ok")
 	run(shinny_chat, bp, nil)
+	ask("hi")
 
 	local transcript = transcript_pane().Buf
 	local input = input_pane().Buf
@@ -760,6 +848,58 @@ test("chat buffers get their syntax filetypes", function()
 	assert_true(input.options and input.options.filetype == "shinnyinput", "input filetype")
 	assert_contains(transcript:text(), "› you")
 	assert_contains(transcript:text(), "deepseek-flash")
+end)
+
+test("chat executes tool calls and reports usage", function()
+	local bp = setup_search("tavily")
+	bp.Cursor.sel = { { X = 0, Y = 0 }, { X = 10, Y = 0 } }
+	state.chat_queue = { TOOL_SSE, FINAL_SSE }
+
+	run(shinny_chat, bp, nil)
+	ask("用工具改写选区")
+
+	assert_contains(bp.Buf:text(), "工具改写后的文本")
+	local text = transcript_pane().Buf:text()
+	assert_contains(text, "⚙ replace_selection")
+	assert_contains(text, "已完成修改。")
+	assert_contains(text, "cache 40%")
+	assert_true(#state.chat_bodies == 2, "expected two requests, got " .. tostring(#state.chat_bodies) .. " log=" .. tostring(_dbg_log))
+	assert_contains(state.chat_bodies[2], '"role":"tool"')
+	assert_contains(state.chat_bodies[2], '"tool_calls"')
+	assert_contains(state.chat_bodies[2], '"reasoning_content"')
+end)
+
+test("chat persists the conversation to disk", function()
+	local bp = setup_search("tavily")
+	state.chat_sse = CHAT_TEXT
+	run(shinny_chat, bp, nil)
+	ask("你好")
+
+	local found = nil
+	for path, data in pairs(state.files) do
+		if path:find("/chats/", 1, true) then
+			found = { path = path, data = data }
+		end
+	end
+	assert_true(found ~= nil, "no chat file written")
+	assert_contains(found.data, '"role":"user"')
+	assert_contains(found.data, '"role":"assistant"')
+	assert_contains(found.data, '"usage"')
+	assert_true(state.mkdirs["/cfg/shinny/chats"] ~= nil, "chat dir not created")
+end)
+
+test("shinny-chat-new clears the session", function()
+	local bp = setup_search("tavily")
+	state.chat_sse = CHAT_TEXT
+	run(shinny_chat, bp, nil)
+	ask("你好")
+	assert_contains(transcript_pane().Buf:text(), "你好，这是流式回答。")
+
+	local chat_pane = transcript_pane()
+	state.commands["shinny-chat-new"](chat_pane, nil)
+	local after = transcript_pane().Buf:text()
+	assert_true(not after:find("流式回答", 1, true), "messages not cleared: " .. after:sub(1, 200))
+	assert_contains(transcript_pane().Buf:text(), "在下方输入栏")
 end)
 
 test("tavily HTTP errors are surfaced", function()
@@ -790,8 +930,8 @@ if integration then
 		state.real = true
 		bp.Cursor.sel = { { X = 0, Y = 0 }, { X = 10, Y = 0 } }
 		run(shinny_chat, bp, nil)
-		ask("把选区改写成更专业的语言")
-		assert_contains(bp.Buf:text(), "重写后的专业表述。")
+		ask("用工具改写选区")
+		assert_contains(bp.Buf:text(), "工具改写后的文本")
 	end)
 end
 

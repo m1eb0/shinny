@@ -44,13 +44,15 @@ Chat 能看到：
 * `把选区改写成更专业的语言`
 * `把这行改成英文`
 
-模型会用下面的块描述修改，shinny 立即写入文件（`Ctrl-Z` 可撤销）：
+模型通过 **function calling** 调用 `replace_selection` / `insert_at_cursor` / `replace_line` / `read_file` 直接操作文件（`Ctrl-Z` 可撤销），不再需要手工粘贴补丁。
 
-    <<<SHINNY_EDIT selection>>>
-    新的选区内容
-    <<<SHINNY_EDIT_END>>>
+Chat 的行为：
 
-target 支持 `selection`（替换选区）、`cursor`（插入到光标处）、`line`（替换光标所在行）。
+* **流式输出**：回答边生成边显示；`Esc` 可随时停止
+* **思考模式**：`reasoning_content` 单独保存，`shinny.showthinking` 打开后显示
+* **会话持久化**：每个文件的会话保存在 `~/.config/micro/shinny/chats/`，重启 micro 可恢复
+* **用量可见**：顶部显示 token 用量与 cache 命中率；`> shinny-usage` 查看累计值；`> shinny-chat-new` 清空会话
+* 上下文按 token 预算裁剪（`shinny.chattokenbudget`），system prompt 固定、易变上下文放在最新一条消息里，尽量提高前缀缓存命中
 
 Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `deepseek-flash`，默认开启思考模式（effort = `high`）。可以随时切换：
 
@@ -85,6 +87,9 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny-effort [low\|high\|max]` | 查看/设置思考强度 |
 | `shinny-raw` | 打开上一次请求的原始响应 |
 | `shinny-help` | 显示所有命令、快捷键、选项和当前设置 |
+| `shinny-chat-new` | 清空当前文件的会话 |
+| `shinny-usage` | 显示本次会话的 token / cache 用量 |
+| `shinny-chat-stop` | 停止正在生成的回复（同 `Esc`） |
 
 ## 选项
 
@@ -103,7 +108,9 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny.chatmodel` | `deepseek-flash` | chat 模型 |
 | `shinny.thinking` | `true` | 是否开启思考模式 |
 | `shinny.effort` | `high` | 思考强度（low/high/max） |
-| `shinny.chatcontext` | `24000` | 发给 chat 的文件上下文字符预算 |
+| `shinny.chatcontext` | `24000` | 发给 chat 的文件上下文字节预算 |
+| `shinny.chattokenbudget` | `24000` | 历史消息的 token 预算 |
+| `shinny.showthinking` | `false` | 是否在对话里显示思考内容 |
 
 ## 外观
 
