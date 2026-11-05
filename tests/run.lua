@@ -10,6 +10,8 @@ if args[1] == "--integration" then
 	integration = { tavily = args[2], search = args[3], chat = args[4] }
 end
 
+os.execute("rm -rf /tmp/shinny-test-cfg 2>/dev/null")
+
 local state = {
 	options = {},
 	env = {},
@@ -224,10 +226,11 @@ end
 
 local function run_command_stream(cmd, on_stdout)
 	local wrapped = string.format(
-		"SHINNY_ENDPOINT=%s SHINNY_KEY=%s SHINNY_BODY=%s sh -c %s 2>&1",
+		"SHINNY_ENDPOINT=%s SHINNY_KEY=%s SHINNY_BODY=%s SHINNY_BODY_FILE=%s sh -c %s 2>&1",
 		shell_quote(state.env.SHINNY_ENDPOINT or ""),
 		shell_quote(state.env.SHINNY_KEY or ""),
 		shell_quote(state.env.SHINNY_BODY or ""),
+		shell_quote(state.env.SHINNY_BODY_FILE or ""),
 		shell_quote(cmd)
 	)
 	local pipe = assert(io.popen(wrapped, "r"))
@@ -248,10 +251,11 @@ end
 
 local function run_command(cmd)
 	local wrapped = string.format(
-		"SHINNY_ENDPOINT=%s SHINNY_KEY=%s SHINNY_BODY=%s sh -c %s 2>&1",
+		"SHINNY_ENDPOINT=%s SHINNY_KEY=%s SHINNY_BODY=%s SHINNY_BODY_FILE=%s sh -c %s 2>&1",
 		shell_quote(state.env.SHINNY_ENDPOINT or ""),
 		shell_quote(state.env.SHINNY_KEY or ""),
 		shell_quote(state.env.SHINNY_BODY or ""),
+		shell_quote(state.env.SHINNY_BODY_FILE or ""),
 		shell_quote(cmd)
 	)
 	local pipe = assert(io.popen(wrapped, "r"))
@@ -317,7 +321,7 @@ packages["micro/config"] = function()
 		AddRuntimeFile = function() end,
 		RTHelp = 0,
 		NoComplete = nil,
-		ConfigDir = "/cfg",
+		ConfigDir = "/tmp/shinny-test-cfg",
 	}
 end
 
@@ -336,15 +340,19 @@ packages["micro/shell"] = function()
 	return {
 		JobStart = function(cmd, on_stdout, _se, on_exit)
 			state.last_cmd = cmd
+			local body = state.env.SHINNY_BODY
+			if state.env.SHINNY_BODY_FILE and state.files[state.env.SHINNY_BODY_FILE] then
+				body = state.files[state.env.SHINNY_BODY_FILE]
+			end
 			state.job_env = {
 				ENDPOINT = state.env.SHINNY_ENDPOINT,
 				KEY = state.env.SHINNY_KEY,
-				BODY = state.env.SHINNY_BODY,
+				BODY = body,
 			}
 			state.job_kind = "search"
 			if tostring(state.env.SHINNY_ENDPOINT):find("chat", 1, true) then
 				state.job_kind = "chat"
-				state.chat_bodies[#state.chat_bodies + 1] = state.env.SHINNY_BODY
+				state.chat_bodies[#state.chat_bodies + 1] = body
 			end
 			state.pending = function()
 				if state.real then
@@ -392,7 +400,12 @@ packages["os"] = function()
 		end,
 		MkdirAll = function(path, mode)
 			state.mkdirs[path] = mode
+			os.execute("mkdir -p '" .. path:gsub("'", "'\\''") .. "' 2>/dev/null")
 		end,
+		Getpid = function()
+			return 4242
+		end,
+		time = os.time,
 		Remove = function(path)
 			state.files[path] = nil
 		end,
@@ -412,14 +425,25 @@ packages["io/ioutil"] = function()
 	return {
 		ReadFile = function(path)
 			local data = state.files[path]
-			if data == nil then
+			if data ~= nil then
+				return data
+			end
+			local f = io.open(path, "rb")
+			if not f then
 				error("no such file: " .. tostring(path), 0)
 			end
-			return data
+			local disk = f:read("*a")
+			f:close()
+			return disk
 		end,
 		WriteFile = function(path, data, mode)
 			state.files[path] = data
 			state.last_written = { path = path, mode = mode }
+			local f = io.open(path, "wb")
+			if f then
+				f:write(data)
+				f:close()
+			end
 		end,
 	}
 end
@@ -643,7 +667,7 @@ test("shinny-prefix persists and changes later searches", function()
 	local bp = setup_search("tavily")
 	state.commands["shinny-prefix"](bp, { "请问" })
 	assert_true(state.options["shinny.prefix"] == "请问", "option updated")
-	assert_contains(state.files["/cfg/shinny.json"], '"prefix": "请问"')
+	assert_contains(state.files["/tmp/shinny-test-cfg/shinny.json"], '"prefix": "请问"')
 
 	state.search_output = SAMPLE
 	run(shinny, bp, nil)
@@ -790,7 +814,7 @@ test("shinny-model switches the model and persists it", function()
 	local bp = setup_search("tavily")
 	state.commands["shinny-model"](bp, { "deepseek-v4-pro" })
 	assert_true(state.options["shinny.chatmodel"] == "deepseek-v4-pro", "model option")
-	assert_contains(state.files["/cfg/shinny.json"], '"model": "deepseek-v4-pro"')
+	assert_contains(state.files["/tmp/shinny-test-cfg/shinny.json"], '"model": "deepseek-v4-pro"')
 
 	state.chat_sse = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
 	run(shinny_chat, bp, nil)
@@ -869,6 +893,31 @@ test("chat executes tool calls and reports usage", function()
 	assert_contains(state.chat_bodies[2], '"reasoning_content"')
 end)
 
+test("attaches an image to the next user message", function()
+	local bp = setup_search("tavily")
+	state.files["/tmp/pic.png"] = "\137PNG\r\n\26\n" .. string.rep("A", 40)
+	run(shinny_chat, bp, nil)
+	state.commands["shinny-image"](input_pane(), { "/tmp/pic.png" })
+	assert_contains(transcript_pane().Buf:text(), "待发送")
+
+	state.chat_sse = CHAT_TEXT
+	ask("描述这张图")
+	assert_contains(state.chat_bodies[1], '"type":"image_url"')
+	assert_contains(state.chat_bodies[1], "data:image/png;base64,")
+	assert_contains(transcript_pane().Buf:text(), "🖼 pic.png")
+end)
+
+test("supports external image URLs and detail", function()
+	local bp = setup_search("tavily")
+	run(shinny_chat, bp, nil)
+	state.commands["shinny-image-detail"](input_pane(), { "low" })
+	state.commands["shinny-image-url"](input_pane(), { "https://example.com/a.jpg" })
+	state.chat_sse = sse_text("ok")
+	ask("看图")
+	assert_contains(state.chat_bodies[1], "https://example.com/a.jpg")
+	assert_contains(state.chat_bodies[1], '"detail":"low"')
+end)
+
 test("chat persists the conversation to disk", function()
 	local bp = setup_search("tavily")
 	state.chat_sse = CHAT_TEXT
@@ -885,7 +934,7 @@ test("chat persists the conversation to disk", function()
 	assert_contains(found.data, '"role":"user"')
 	assert_contains(found.data, '"role":"assistant"')
 	assert_contains(found.data, '"usage"')
-	assert_true(state.mkdirs["/cfg/shinny/chats"] ~= nil, "chat dir not created")
+	assert_true(state.mkdirs["/tmp/shinny-test-cfg/shinny/chats"] ~= nil, "chat dir not created")
 end)
 
 test("shinny-chat-new clears the session", function()

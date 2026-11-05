@@ -77,6 +77,18 @@ Chat 是流式的：回答边生成边显示，`Esc` 停止；思考内容单独
 
 会话按文件持久化在 `~/.config/micro/shinny/chats/`，重启 micro 能恢复；顶部显示 token 用量和 cache 命中率，`> shinny-usage` 查看累计值，`> shinny-chat-new` 清空会话。上下文按 `shinny.chattokenbudget`（token 估算）裁剪；system prompt 固定、易变上下文注入最新一条 user 消息，以尽量命中 DeepSeek 的前缀缓存。
 
+### 图片
+
+`deepseek-flash` 支持图片。附到下一问的图片用 OpenAI 兼容的 `image_url` block 发送（文件转 base64 data URL）：
+
+    > shinny-image ~/Pictures/shot.png     # PNG / JPEG / GIF / WebP
+    > shinny-image                        # 剪贴板（wl-paste / xclip）
+    > shinny-image-url https://…/a.jpg
+    > shinny-image-detail low             # low | high | original | auto
+    > shinny-image-clear
+
+单张默认上限 `shinny.imagemaxmb` = 12 MB；对话记录里会显示 `🖼` 缩略标记。图片只出现在 user 消息中（API 限制），每张按约 1024 tokens 计入预算。
+
 ## 命令与选项
 
 | 命令 | 说明 |
@@ -94,6 +106,10 @@ Chat 是流式的：回答边生成边显示，`Esc` 停止；思考内容单独
 | `shinny-chat-new` | 清空当前文件的会话 |
 | `shinny-usage` | 显示 token / cache 用量 |
 | `shinny-chat-stop` | 停止生成（同 `Esc`） |
+| `shinny-image [path]` | 附加图片到下一问；不带参数读剪贴板 |
+| `shinny-image-url <url>` | 附加公网图片 URL |
+| `shinny-image-detail <level>` | 设置图片 detail |
+| `shinny-image-clear` | 清空待发送图片 |
 
 | 选项 | 默认值 |
 | --- | --- |
@@ -107,6 +123,8 @@ Chat 是流式的：回答边生成边显示，`Esc` 停止；思考内容单独
 | `shinny.chatcontext` | `24000` |
 | `shinny.chattokenbudget` | `24000` |
 | `shinny.showthinking` | `false` |
+| `shinny.imagedetail` | `auto` |
+| `shinny.imagemaxmb` | `12` |
 | `shinny.endpoint` / `shinny.deepseektoolsurl` / `shinny.chaturl` | 官方地址 |
 
 ## 外观
@@ -118,12 +136,13 @@ chat 分屏、输入栏、搜索结果和帮助页都带语法高亮（角色、
 - 搜索和 chat 都通过 `micro/shell.JobStart` 在后台跑 `curl`；chat 用 SSE 流式读取，`content` / `reasoning_content` / `tool_calls` 增量拼装。
 - Chat 使用 DeepSeek 的 function calling：多轮 tool loop 直到模型给出最终回答；带 `tools` 时按文档回传历史 `reasoning_content`。
 - 响应由插件自带的小型 JSON 解码器解析（micro 的 Lua 没有 JSON 库），并针对 gopher-lua 的 `table.concat` 限制做了分批拼接；会话 JSON 由插件自己编码。
+- 带图片的请求体可能很大，chat 请求会写到 `shinny/chats/request-*.json` 再由 `curl --data-binary @file` 读取，避免环境变量/命令行长度限制；请求结束即删除。
 - 上下文从 `micro.Tabs()` 枚举所有 pane 的 buffer 拼装，并做 token 估算（CJK 感知）与历史裁剪；写入调用 `Buffer:Insert`/`Buffer:Remove`，进入 micro 的 undo 栈。
 
 ## 开发
 
 ```sh
-make test    # 21 个 headless 测试 + 2 个走本地 mock 的端到端测试
+make test    # 23 个 headless 测试 + 2 个走本地 mock 的端到端测试
 ```
 
 `tests/run.lua` 用假的 micro API 跑逻辑；`tests/integration.sh` 启动

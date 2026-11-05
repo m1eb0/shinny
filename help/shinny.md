@@ -54,6 +54,18 @@ Chat 的行为：
 * **用量可见**：顶部显示 token 用量与 cache 命中率；`> shinny-usage` 查看累计值；`> shinny-chat-new` 清空会话
 * 上下文按 token 预算裁剪（`shinny.chattokenbudget`），system prompt 固定、易变上下文放在最新一条消息里，尽量提高前缀缓存命中
 
+### 图片输入
+
+`deepseek-flash` 支持图片。图片会随**下一条** user 消息发送（每张约 1024 tokens，按尺寸计费）：
+
+    > shinny-image ~/Pictures/shot.png     # 文件（PNG / JPEG / GIF / WebP）
+    > shinny-image                        # 从剪贴板读（wl-paste / xclip）
+    > shinny-image-url https://…/a.jpg    # 公网 URL
+    > shinny-image-detail low             # low | high | original | auto
+    > shinny-image-clear                  # 取消待发送图片
+
+文件会转成 base64 data URL 内联发送；单张默认上限 12 MB（`shinny.imagemaxmb`），base64 后仍远低于 API 的 48 MiB 请求体限制。图片只放在 user 消息里（API 限制）。
+
 Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `deepseek-flash`，默认开启思考模式（effort = `high`）。可以随时切换：
 
     > shinny-model deepseek-v4-pro
@@ -90,6 +102,10 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny-chat-new` | 清空当前文件的会话 |
 | `shinny-usage` | 显示本次会话的 token / cache 用量 |
 | `shinny-chat-stop` | 停止正在生成的回复（同 `Esc`） |
+| `shinny-image [path]` | 附加图片到下一问；不带参数读剪贴板 |
+| `shinny-image-url <url>` | 附加公网图片 URL |
+| `shinny-image-detail <level>` | 设置图片 detail |
+| `shinny-image-clear` | 清空待发送图片 |
 
 ## 选项
 
@@ -111,6 +127,8 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny.chatcontext` | `24000` | 发给 chat 的文件上下文字节预算 |
 | `shinny.chattokenbudget` | `24000` | 历史消息的 token 预算 |
 | `shinny.showthinking` | `false` | 是否在对话里显示思考内容 |
+| `shinny.imagedetail` | `auto` | 图片 detail：`low` / `high` / `original` / `auto` |
+| `shinny.imagemaxmb` | `12` | 单张图片大小上限（MB） |
 
 ## 外观
 

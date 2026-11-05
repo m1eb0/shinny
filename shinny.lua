@@ -1,4 +1,4 @@
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -1333,7 +1333,7 @@ local function buffer_end_loc(buf)
 	return buffer.Loc(0, 0)
 end
 
-local function replace_chat_text(chat, text)
+function replace_chat_text(chat, text)
 	local buf = chat.buf
 	if buf == nil then
 		return
@@ -1383,6 +1383,81 @@ local TOOLS_JSON = [[
   {"type":"function","function":{"name":"read_file","description":"Read a file and return its contents.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"Path of the file to read"}},"required":["path"]}}}
 ]
 ]]
+
+local B64CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+local function base64_encode(data)
+	local out = {}
+	local buf = {}
+	local i = 1
+	local n = #data
+	while i <= n do
+		local b1 = data:byte(i)
+		local b2 = data:byte(i + 1)
+		local b3 = data:byte(i + 2)
+		local c1 = math.floor(b1 / 4)
+		local c2 = (b1 % 4) * 16 + (b2 ~= nil and math.floor(b2 / 16) or 0)
+		local c3 = b2 ~= nil and ((b2 % 16) * 4 + (b3 ~= nil and math.floor(b3 / 64) or 0)) or 0
+		local c4 = b3 ~= nil and (b3 % 64) or 0
+		buf[#buf + 1] = B64CHARS:sub(c1 + 1, c1 + 1)
+		buf[#buf + 1] = B64CHARS:sub(c2 + 1, c2 + 1)
+		buf[#buf + 1] = b2 ~= nil and B64CHARS:sub(c3 + 1, c3 + 1) or "="
+		buf[#buf + 1] = b3 ~= nil and B64CHARS:sub(c4 + 1, c4 + 1) or "="
+		if #buf >= 4096 then
+			out[#out + 1] = table.concat(buf)
+			buf = {}
+		end
+		i = i + 3
+	end
+	if #buf > 0 then
+		out[#out + 1] = table.concat(buf)
+	end
+	return table.concat(out)
+end
+
+local function image_mime(data, name)
+	if data:sub(1, 8) == "\137PNG\r\n\26\n" then
+		return "image/png"
+	end
+	if data:sub(1, 2) == "\255\216" then
+		return "image/jpeg"
+	end
+	if data:sub(1, 3) == "GIF" then
+		return "image/gif"
+	end
+	if data:sub(1, 4) == "RIFF" and data:sub(9, 12) == "WEBP" then
+		return "image/webp"
+	end
+	local ext = tostr(name):lower():match("%.([%w]+)$")
+	local map = { png = "image/png", jpg = "image/jpeg", jpeg = "image/jpeg", gif = "image/gif", webp = "image/webp" }
+	return map[ext]
+end
+
+local function image_detail()
+	local d = trim(tostr(option("imagedetail", "auto"))):lower()
+	if d ~= "low" and d ~= "high" and d ~= "original" and d ~= "auto" then
+		return "auto"
+	end
+	return d
+end
+
+local function basename(path)
+	return tostr(path):match("([^/\\]+)$") or tostr(path)
+end
+
+local function attach_image(chat, img)
+	if type(chat.pending_images) ~= "table" then
+		chat.pending_images = {}
+	end
+	chat.pending_images[#chat.pending_images + 1] = img
+	local pending = chat.pending_images
+	chat.messages = chat.messages
+	-- re-render the pending attachment hint
+	if chat.buf ~= nil and not chat.streaming then
+		replace_chat_text(chat, render_chat(chat, false))
+	end
+	micro.InfoBar():Message(string.format("shinny: 已附加 %s（%d KB，共 %d 张）", img.name, math.floor((img.bytes or 0) / 1024), #pending))
+end
 
 local function build_context_block(chat)
 	local parts = {}
@@ -1470,6 +1545,9 @@ local function window_messages(chat)
 	for i = #msgs, 1, -1 do
 		local m = msgs[i]
 		local t = est_tokens(m.content or "") + est_tokens(m.reasoning_content or "")
+		if type(m.images) == "table" then
+			t = t + #m.images * 1024
+		end
 		if total + t > budget and start <= #msgs then
 			break
 		end
@@ -1496,7 +1574,19 @@ local function build_request(chat)
 	add('{"role":"system","content":"' .. json_escape(SYSTEM_PROMPT) .. '"}')
 	for _, m in ipairs(window_messages(chat)) do
 		if m.role == "user" then
-			add('{"role":"user","content":"' .. json_escape(m.content or "") .. '"}')
+			if type(m.images) == "table" and #m.images > 0 then
+				local blocks = { '{"type":"text","text":"' .. json_escape(m.content or "") .. '"}' }
+				for _, img in ipairs(m.images) do
+					blocks[#blocks + 1] = '{"type":"image_url","image_url":{"url":"'
+						.. json_escape(img.url or "")
+						.. '","detail":"'
+						.. json_escape(img.detail or "auto")
+						.. '"}}'
+				end
+				add('{"role":"user","content":[' .. table.concat(blocks, ",") .. "]}")
+			else
+				add('{"role":"user","content":"' .. json_escape(m.content or "") .. '"}')
+			end
 		elseif m.role == "assistant" then
 			local parts = { '"role":"assistant"' }
 			local content = m.content or ""
@@ -1565,7 +1655,7 @@ local function indent_text(text)
 	return (tostr(text):gsub("\n", "\n  "))
 end
 
-local function render_chat(chat, streaming)
+function render_chat(chat, streaming)
 	local out = {}
 	local function add(line)
 		out[#out + 1] = line
@@ -1597,6 +1687,11 @@ local function render_chat(chat, streaming)
 		if m.role == "user" then
 			add("› you")
 			add("  " .. indent_text(m.display or m.content or ""))
+			if type(m.images) == "table" then
+				for _, img in ipairs(m.images) do
+					add("  🖼 " .. tostr(img.name or img.url))
+				end
+			end
 			add("")
 		elseif m.role == "assistant" then
 			local content = m.display or m.content or ""
@@ -1615,6 +1710,15 @@ local function render_chat(chat, streaming)
 			add("  ⚙ " .. tostr(m.display or "tool"))
 			add("")
 		end
+	end
+
+	if type(chat.pending_images) == "table" and #chat.pending_images > 0 then
+		local names = {}
+		for _, img in ipairs(chat.pending_images) do
+			names[#names + 1] = tostr(img.name)
+		end
+		add("  🖼 待发送: " .. table.concat(names, ", "))
+		add("")
 	end
 
 	if streaming then
@@ -1682,7 +1786,7 @@ local finalize_cancel
 local STREAM_CMD = 'curl -sS -N --max-time 180 -X POST "$SHINNY_ENDPOINT"'
 	.. ' -H "Content-Type: application/json"'
 	.. ' -H "Authorization: Bearer $SHINNY_KEY"'
-	.. ' --data-binary "$SHINNY_BODY"'
+	.. ' --data-binary @"$SHINNY_BODY_FILE"'
 	.. ' -w "\\n' .. STATUS_MARKER .. ':%{http_code}"'
 
 local function accumulate_tool_calls(chat, list)
@@ -1733,9 +1837,22 @@ function start_request(chat)
 	chat.text = render_chat(chat, true)
 	replace_chat_text(chat, chat.text)
 
+	REQ_SEQ = (REQ_SEQ or 0) + 1
+	chat.req_seq = REQ_SEQ
+	local body_path = chat_dir() .. "/request-" .. tostring(REQ_SEQ) .. ".json"
+	pcall(os.MkdirAll, chat_dir(), 448)
+	local wrote = pcall(ioutil.WriteFile, body_path, body, 384)
+	if not wrote then
+		chat.streaming = false
+		micro.InfoBar():Error("shinny: 无法写入请求体 " .. body_path)
+		replace_chat_text(chat, render_chat(chat, false))
+		return
+	end
+	chat.body_path = body_path
 	os.Setenv("SHINNY_ENDPOINT", url)
 	os.Setenv("SHINNY_KEY", key)
-	os.Setenv("SHINNY_BODY", body)
+	os.Setenv("SHINNY_BODY", "")
+	os.Setenv("SHINNY_BODY_FILE", body_path)
 	micro.InfoBar():Message("shinny: streaming…")
 
 	local ok, job = pcall(shell.JobStart, STREAM_CMD, function(chunk)
@@ -1748,6 +1865,10 @@ function start_request(chat)
 
 	if not ok then
 		chat.streaming = false
+		if chat.body_path ~= nil then
+			pcall(os.Remove, chat.body_path)
+			chat.body_path = nil
+		end
 		os.Setenv("SHINNY_KEY", "")
 		os.Setenv("SHINNY_BODY", "")
 		chat.messages[#chat.messages + 1] = {
@@ -1825,6 +1946,10 @@ end
 
 function handle_stream_exit(chat, output)
 	chat.job = nil
+	if chat.body_path ~= nil then
+		pcall(os.Remove, chat.body_path)
+		chat.body_path = nil
+	end
 	if not chat.streaming then
 		return
 	end
@@ -1947,11 +2072,16 @@ local function send_chat(chat, question)
 
 	local context = build_context_block(chat)
 	local api_content = context .. "\n\n[用户问题]\n" .. question
-	chat.messages[#chat.messages + 1] = {
+	local msg = {
 		role = "user",
 		content = api_content,
 		display = question,
 	}
+	if type(chat.pending_images) == "table" and #chat.pending_images > 0 then
+		msg.images = chat.pending_images
+	end
+	chat.pending_images = {}
+	chat.messages[#chat.messages + 1] = msg
 	chat.round = 0
 	chat.retries = 0
 	chat.canceled = false
@@ -2140,6 +2270,7 @@ local function chat_for(bp)
 			ipane = nil,
 			src_pane = bp,
 			streaming = false,
+			pending_images = {},
 			text = "",
 			round = 0,
 			retries = 0,
@@ -2192,6 +2323,7 @@ local function render_help()
 	add("- 模型通过 function calling 直接修改文件（`Ctrl-Z` 可撤销）")
 	add("- 会话按文件保存到 `~/.config/micro/shinny/chats`，重启可恢复")
 	add("- 底部会显示 token 用量和 cache 命中率")
+	add("- 支持图片输入（PNG / JPEG / GIF / WebP）：`> shinny-image ~/shot.png`，或直接 `> shinny-image` 读剪贴板；图片随下一条消息发送")
 	add("")
 	add("## 命令")
 	add("")
@@ -2206,6 +2338,10 @@ local function render_help()
 	add("- `shinny-chat-new` — 清空当前文件的会话")
 	add("- `shinny-usage` — 显示 token / cache 用量")
 	add("- `shinny-chat-stop` — 停止正在生成的回复")
+	add("- `shinny-image [path]` — 附加图片到下一问（不带参数读剪贴板）")
+	add("- `shinny-image-url <url>` — 附加公网图片 URL")
+	add("- `shinny-image-detail <level>` — low / high / original / auto")
+	add("- `shinny-image-clear` — 清空待发送图片")
 	add("- `shinny-raw` — 打开上一次请求的原始响应")
 	add("- `shinny-help` — 显示这份帮助")
 	add("")
@@ -2220,12 +2356,13 @@ local function render_help()
 	add("- DeepSeek key：" .. (api_key("deepseek") ~= "" and "已配置" or "未配置"))
 	add("- 结果数量：`" .. tostr(math.floor(option_number("maxresults", 5))) .. "`")
 	add("- 上下文预算：`" .. tostr(math.floor(option_number("chattokenbudget", 24000))) .. "` tokens")
+	add("- 图片 detail：" .. image_detail() .. "（上限 " .. tostr(math.floor(option_number("imagemaxmb", 12))) .. " MB/张）")
 	add("")
 	add("## 常用选项")
 	add("")
 	add("`shinny.prefix`、`shinny.suffix`、`shinny.backend`、`shinny.apikey`、")
 	add("`shinny.deepseekkey`、`shinny.chatmodel`、`shinny.thinking`、`shinny.effort`、")
-	add("`shinny.maxresults`、`shinny.chatcontext`、`shinny.chattokenbudget`、`shinny.showthinking`")
+	add("`shinny.maxresults`、`shinny.chatcontext`、`shinny.chattokenbudget`、`shinny.showthinking`、`shinny.imagedetail`、`shinny.imagemaxmb`")
 	add("")
 	add("完整文档：`> help shinny`")
 	return table.concat(lines, "\n") .. "\n"
@@ -2372,6 +2509,133 @@ local function chat_at(bp)
 	return chat_for(bp)
 end
 
+local function require_chat(bp)
+	local chat = chat_at(bp)
+	if chat == nil then
+		micro.InfoBar():Error("shinny: 没有活动 chat")
+	end
+	return chat
+end
+
+local function add_image_file(chat, path, display_name)
+	local maxmb = option_number("imagemaxmb", 12)
+	local limit = maxmb * 1024 * 1024
+	local ok, data = pcall(ioutil.ReadFile, path)
+	if not ok or data == nil then
+		micro.InfoBar():Error("shinny: 读不到图片 " .. tostr(path))
+		return
+	end
+	local text = ""
+	pcall(function()
+		text = fmt.Sprintf("%s", data)
+	end)
+	data = tostr(text)
+	if #data > limit then
+		micro.InfoBar():Error(string.format("shinny: 图片 %.1f MB 超过上限 %d MB", #data / 1048576, maxmb))
+		return
+	end
+	local mime = image_mime(data, path)
+	if mime == nil then
+		micro.InfoBar():Error("shinny: 只支持 JPEG / PNG / GIF / WebP")
+		return
+	end
+	attach_image(chat, {
+		kind = "file",
+		name = display_name or basename(path),
+		url = "data:" .. mime .. ";base64," .. base64_encode(data),
+		detail = image_detail(),
+		bytes = #data,
+	})
+end
+
+function shinny_image(bp, args)
+	local chat = require_chat(bp)
+	if chat == nil then
+		return
+	end
+	local path = trim(join_args(args))
+	if path == "" then
+		local data = nil
+		local ok, out = pcall(shell.ExecCommand, "wl-paste", "--type", "image/png")
+		if ok and out ~= nil and out ~= "" then
+			data = out
+		else
+			local ok2, out2 = pcall(shell.ExecCommand, "xclip", "-selection", "clipboard", "-t", "image/png", "-o")
+			if ok2 and out2 ~= nil and out2 ~= "" then
+				data = out2
+			end
+		end
+		if data == nil then
+			micro.InfoBar():Error("shinny: 剪贴板里没有图片，或改用 > shinny-image <path>")
+			return
+		end
+		local mime = image_mime(data, "clipboard.png")
+		if mime == nil then
+			micro.InfoBar():Error("shinny: 剪贴板内容不是支持的图片格式")
+			return
+		end
+		if #data > option_number("imagemaxmb", 12) * 1024 * 1024 then
+			micro.InfoBar():Error("shinny: 剪贴板图片太大")
+			return
+		end
+		attach_image(chat, {
+			kind = "clipboard",
+			name = "clipboard.png",
+			url = "data:" .. mime .. ";base64," .. base64_encode(data),
+			detail = image_detail(),
+			bytes = #data,
+		})
+		return
+	end
+	if path:sub(1, 2) == "~/" then
+		path = tostr(os.Getenv("HOME")) .. path:sub(2)
+	end
+	add_image_file(chat, path)
+end
+
+function shinny_image_url(bp, args)
+	local chat = require_chat(bp)
+	if chat == nil then
+		return
+	end
+	local url = trim(join_args(args))
+	if url == "" then
+		micro.InfoBar():Error("shinny: 用法 > shinny-image-url <https://...>")
+		return
+	end
+	if #url > 8192 or not url:match("^https?://") then
+		micro.InfoBar():Error("shinny: 需要 http(s) 图片 URL，且不超过 8192 字符")
+		return
+	end
+	attach_image(chat, { kind = "url", name = shorten(url, 60), url = url, detail = image_detail(), bytes = 0 })
+end
+
+function shinny_image_clear(bp, args)
+	local chat = require_chat(bp)
+	if chat == nil then
+		return
+	end
+	chat.pending_images = {}
+	if chat.buf ~= nil and not chat.streaming then
+		replace_chat_text(chat, render_chat(chat, false))
+	end
+	micro.InfoBar():Message("shinny: 已清空待发送图片")
+end
+
+function shinny_image_detail(bp, args)
+	local value = trim(join_args(args)):lower()
+	if value == "" then
+		micro.InfoBar():Message("shinny: image detail = " .. image_detail())
+		return
+	end
+	if value ~= "low" and value ~= "high" and value ~= "original" and value ~= "auto" then
+		micro.InfoBar():Error("shinny: detail 只能是 low | high | original | auto")
+		return
+	end
+	set_setting("imagedetail", value)
+	micro.InfoBar():Message("shinny: image detail = " .. value)
+end
+
 function shinny_chat_new(bp, args)
 	local chat = chat_at(bp)
 	if chat == nil then
@@ -2468,6 +2732,8 @@ function init()
 	config.RegisterGlobalOption("shinny", "chatcontext", 24000)
 	config.RegisterGlobalOption("shinny", "chattokenbudget", 24000)
 	config.RegisterGlobalOption("shinny", "showthinking", false)
+	config.RegisterGlobalOption("shinny", "imagedetail", "auto")
+	config.RegisterGlobalOption("shinny", "imagemaxmb", 12)
 
 	apply_state()
 
@@ -2481,6 +2747,10 @@ function init()
 	config.MakeCommand("shinny-chat-new", shinny_chat_new, config.NoComplete)
 	config.MakeCommand("shinny-usage", shinny_usage, config.NoComplete)
 	config.MakeCommand("shinny-chat-stop", shinny_chat_stop, config.NoComplete)
+	config.MakeCommand("shinny-image", shinny_image, config.NoComplete)
+	config.MakeCommand("shinny-image-url", shinny_image_url, config.NoComplete)
+	config.MakeCommand("shinny-image-clear", shinny_image_clear, config.NoComplete)
+	config.MakeCommand("shinny-image-detail", shinny_image_detail, config.NoComplete)
 	config.MakeCommand("shinny-model", shinny_model, config.NoComplete)
 	config.MakeCommand("shinny-thinking", shinny_thinking, config.NoComplete)
 	config.MakeCommand("shinny-effort", shinny_effort, config.NoComplete)

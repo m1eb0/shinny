@@ -79,12 +79,21 @@ class Handler(BaseHTTPRequestHandler):
                 with open(RECORD, "w", encoding="utf-8") as f:
                     json.dump(body, f, ensure_ascii=False, indent=2)
 
+            def text_of(content):
+                if isinstance(content, str):
+                    return content
+                if isinstance(content, list):
+                    return " ".join(
+                        part.get("text", "") for part in content if part.get("type") == "text"
+                    )
+                return ""
+
             messages = body.get("messages") or []
             last_user = ""
             has_tool_result = False
             for m in messages:
                 if m.get("role") == "user":
-                    last_user = m.get("content", "")
+                    last_user = text_of(m.get("content"))
                 if m.get("role") == "tool":
                     has_tool_result = True
 
