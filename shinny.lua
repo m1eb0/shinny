@@ -1,4 +1,4 @@
-VERSION = "0.7.6"
+VERSION = "0.7.7"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -1909,6 +1909,7 @@ function start_request(chat)
 	chat.streaming = true
 	chat.canceled = false
 	chat.timeout = false
+	chat.waiting_note = nil
 	chat.last_activity = TICK
 	chat.sbuf = ""
 	chat.raw = ""
@@ -1977,6 +1978,7 @@ end
 
 function handle_stream_chunk(chat, chunk)
 	chat.last_activity = TICK
+	chat.waiting_note = nil
 	if chat.log_parts ~= nil then
 		chat.log_chunks = (chat.log_chunks or 0) + 1
 		log_append(chat, string.format("[chunk %d tick=%d bytes=%d]\n", chat.log_chunks, TICK, #tostr(chunk)))
@@ -2071,8 +2073,16 @@ local function watch_chats()
 	for _, chat in pairs(chats) do
 		if chat.streaming and chat.job ~= nil then
 			local last = chat.last_activity or TICK
-			local limit = math.max(2, math.floor(option_number("streamtimeout", 60) / 5))
-			if TICK - last >= limit then
+			local idle = TICK - last
+			if idle >= 2 then
+				local seconds = idle * 5
+				if chat.waiting_note ~= seconds then
+					chat.waiting_note = seconds
+					micro.InfoBar():Message(string.format("shinny: 等待服务端… %ds（Esc 停止）", seconds))
+				end
+			end
+			local limit = math.max(2, math.floor(option_number("streamtimeout", 120) / 5))
+			if idle >= limit then
 				chat.timeout = true
 				local job = chat.job
 				chat.job = nil
@@ -3376,7 +3386,7 @@ function init()
 	config.RegisterGlobalOption("shinny", "effort", DEFAULT_EFFORT)
 	config.RegisterGlobalOption("shinny", "maxtokens", 65536)
 	config.RegisterGlobalOption("shinny", "debug", true)
-	config.RegisterGlobalOption("shinny", "streamtimeout", 60)
+	config.RegisterGlobalOption("shinny", "streamtimeout", 120)
 	config.RegisterGlobalOption("shinny", "chattokenbudget", 24000)
 	config.RegisterGlobalOption("shinny", "showthinking", false)
 	config.RegisterGlobalOption("shinny", "imagedetail", "auto")
