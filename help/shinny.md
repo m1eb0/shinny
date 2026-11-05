@@ -30,9 +30,9 @@
 
 ## LLM Chat
 
-在任意文件里按 `Alt-i`：打开这个文件专属的 **chat tab**，上方是对话记录，下方是输入栏（`>`，随内容自动增高/变矮，最多 8 行）。直接输入问题，按 Enter 发送，`Shift+Enter` 换行；再按 `Alt-i` 会把焦点带回输入栏。不同文件各自一个 tab，互不影响；用 `Alt-,` / `Alt-.` 切换。
+在任意文件里按 `Alt-i`：在**右侧打开 chat 分屏**，上方是对话记录，下方是输入栏（`>`，随内容自动增高/变矮，最多 8 行）。直接输入问题，按 Enter 发送，`Shift+Enter` 换行；再按 `Alt-i` 会把焦点带回输入栏。
 
-设置 `shinny.chattab = false` 可以回到旧的分屏布局。
+**使用哪个会话，取决于按快捷键时光标所在的文件**：在 A 文件按 `Alt-i` 显示 A 的会话；在 B 文件按 `Alt-i` 会把同一个右侧分屏切换成 B 的会话。每个文件的历史、图片、用量独立保存；同一 tab 内始终只有一个 chat 分屏。
 
 > `Shift+Enter` 在普通编辑区和 chat 输入栏都可用（普通编辑区会沿用当前行缩进）；它需要终端把它映射成 `Alt-Enter`。Ghostty 在 `~/.config/ghostty/config.ghostty` 写 `keybind = shift+enter=text:\x1b\r`，然后 `ctrl+shift+,` 重载配置。原因：micro 2.0.15 的 tcell 还不认识 Ghostty 默认发的 `CSI 27;2;13~`，会把 `ESC [` 当成 `Alt-[` 从而跳到 buffer 开头。插件已把 `Alt-Enter` 绑定到输入栏换行。
 
@@ -141,7 +141,7 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny.showthinking` | `false` | 是否在对话里显示思考内容 |
 | `shinny.imagedetail` | `auto` | 图片 detail：`low` / `high` / `original` / `auto` |
 | `shinny.imagemaxmb` | `12` | 单张图片大小上限（MB） |
-| `shinny.chattab` | `true` | chat 用独立 tab（false 回到分屏） |
+
 
 ## 外观
 

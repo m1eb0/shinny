@@ -1,4 +1,4 @@
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -2223,6 +2223,92 @@ local function focus_input(chat)
 	return pane
 end
 
+local function close_chat_ui(chat)
+	if chat == nil then
+		return
+	end
+	if chat.ipane ~= nil then
+		pcall(function()
+			chat.ipane:ForceQuit()
+		end)
+	end
+	if chat.pane ~= nil then
+		pcall(function()
+			chat.pane:ForceQuit()
+		end)
+	end
+	chat.buf = nil
+	chat.ibuf = nil
+	chat.pane = nil
+	chat.ipane = nil
+	chat.text = ""
+end
+
+local function chats_in_tab(bp)
+	local out = {}
+	local seen = {}
+	local tab = bp:Tab()
+	if tab == nil then
+		return out
+	end
+	local count = 0
+	pcall(function()
+		count = #tab.Panes
+	end)
+	for i = 1, count do
+		local pane = tab.Panes[i]
+		if pane ~= nil and pane.Buf ~= nil then
+			local name = ""
+			pcall(function()
+				name = tostr(pane.Buf:GetName())
+			end)
+			local chat = chats[name] or chats_by_input[name]
+			if chat ~= nil and not seen[chat] then
+				seen[chat] = true
+				out[#out + 1] = chat
+			end
+		end
+	end
+	return out
+end
+
+local function switch_chat_ui(bp, keep)
+	local tab = bp:Tab()
+	local count = 0
+	if tab ~= nil then
+		pcall(function()
+			count = #tab.Panes
+		end)
+	end
+	local keep_in_tab = keep.pane ~= nil
+	if keep.pane ~= nil and count > 0 then
+		keep_in_tab = false
+		for i = 1, count do
+			local pane = tab.Panes[i]
+			if pane == keep.pane then
+				keep_in_tab = true
+				break
+			end
+		end
+	end
+	for _, other in ipairs(chats_in_tab(bp)) do
+		if other ~= keep then
+			if other.streaming then
+				micro.InfoBar():Error("shinny: 另一个会话还在生成，先按 Esc 停止")
+				return false
+			end
+			close_chat_ui(other)
+		end
+	end
+	if keep.pane ~= nil and count > 0 and not keep_in_tab then
+		if keep.streaming then
+			return false
+		end
+		close_chat_ui(keep)
+	end
+	return true
+end
+
 function resize_chat_input(chat)
 	if chat == nil or chat.ipane == nil or chat.ibuf == nil then
 		return
@@ -2269,37 +2355,43 @@ local function start_input_watch()
 	micro.After(250000000, watch_input_panes)
 end
 
+local function rightmost_pane(bp)
+	local tab = bp:Tab()
+	if tab == nil then
+		return bp
+	end
+	local count = 0
+	pcall(function()
+		count = #tab.Panes
+	end)
+	local best = bp
+	local bestx = -1
+	for i = 1, count do
+		local pane = tab.Panes[i]
+		if pane ~= nil then
+			local ok, v = pcall(function()
+				return pane:GetView()
+			end)
+			if ok and v ~= nil and type(v.X) == "number" and v.X > bestx then
+				bestx = v.X
+				best = pane
+			end
+		end
+	end
+	return best
+end
+
 local function ensure_chat_panes(bp, chat)
 	local tpane = find_pane_by_name(chat.name)
 	local ipane = find_pane_by_name(chat.input_name)
 
 	if tpane == nil then
-		if option_bool("chattab", true) then
-			local ok = pcall(function()
-				bp:AddTab()
-			end)
-			if ok then
-				local tabs = micro.Tabs()
-				local tab = tabs.List[#tabs.List]
-				tpane = tab and tab.Panes[1]
-				if tpane ~= nil and tpane.Buf ~= nil then
-					chat.buf = tpane.Buf
-					chat.text = ""
-					pcall(function()
-						chat.buf:SetName(chat.name)
-					end)
-				else
-					tpane = nil
-				end
-			end
-		end
-		if tpane == nil then
-			local tbuf = buffer.NewBuffer("", "")
-			tbuf:SetName(chat.name)
-			chat.buf = tbuf
-			chat.text = ""
-			tpane = bp:VSplitIndex(tbuf, true)
-		end
+		local tbuf = buffer.NewBuffer("", "")
+		tbuf:SetName(chat.name)
+		chat.buf = tbuf
+		chat.text = ""
+		local dock = rightmost_pane(bp)
+		tpane = dock:VSplitIndex(tbuf, true)
 		chat.pane = tpane
 	end
 	chat.pane = tpane
@@ -2503,10 +2595,11 @@ local function render_help()
 	add("")
 	add("## Chat")
 	add("")
-	add("- `Alt-i` 打开该文件专属的 chat tab：上方对话记录，下方 `>` 输入栏（不同文件相互隔离）")
+	add("- `Alt-i` 在右侧打开 chat 分屏；会话由光标所在文件决定（不同文件相互隔离）")
 	add("- 在输入栏输入问题，`Enter` 发送；再按 `Alt-i` 回到输入栏")
 	add("- 流式输出；回答和思考过程分开处理，思考内容可选显示")
 	add("- 输入栏 Enter 发送，Shift+Enter 换行（终端映射为 Alt-Enter 后生效）")
+	add("- 在另一个文件按 Alt-i 会把右侧分屏切换成那个文件的会话")
 	add("- Chat 能看到所有打开的文件、光标位置、选区和最近一次搜索结果")
 	add("- 模型通过 function calling 直接修改文件（`Ctrl-Z` 可撤销）")
 	add("- 会话按文件保存到 `~/.config/micro/shinny/chats`，重启可恢复")
@@ -3100,6 +3193,9 @@ function shinny_chat(bp, args)
 		micro.InfoBar():Error("shinny: 无法创建 chat")
 		return
 	end
+	if not switch_chat_ui(bp, chat) then
+		return
+	end
 	ensure_chat_panes(bp, chat)
 	focus_input(chat)
 end
@@ -3123,7 +3219,6 @@ function init()
 	config.RegisterGlobalOption("shinny", "effort", DEFAULT_EFFORT)
 	config.RegisterGlobalOption("shinny", "chatcontext", 24000)
 	config.RegisterGlobalOption("shinny", "chattokenbudget", 24000)
-	config.RegisterGlobalOption("shinny", "chattab", true)
 	config.RegisterGlobalOption("shinny", "showthinking", false)
 	config.RegisterGlobalOption("shinny", "imagedetail", "auto")
 	config.RegisterGlobalOption("shinny", "imagemaxmb", 12)

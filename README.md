@@ -61,9 +61,9 @@ DeepSeek 搜索走官方 `POST /v1/tools/search`，需要 DeepSeek key；两个�
 
 ### Chat
 
-在文件里按 `Alt-i`：打开这个文件专属的 **chat tab**——上方是对话记录，下方是输入栏（`>`，随内容自动增高/变矮，最多 8 行）。直接输入问题，Enter 发送，`Shift+Enter` 换行；再按 `Alt-i` 把焦点带回输入栏。不同文件有各自独立的 chat tab，互不影响；用 `Alt-,` / `Alt-.` 切换标签页。
+在文件里按 `Alt-i`：在**右侧打开 chat 分屏**——上方是对话记录，下方是输入栏（`>`，随内容自动增高/变矮，最多 8 行）。直接输入问题，Enter 发送，`Shift+Enter` 换行；再按 `Alt-i` 把焦点带回输入栏。
 
-想要旧的分屏布局，设置 `> set shinny.chattab false`。
+**用哪个会话由按快捷键时光标所在的文件决定**：在 A 文件按 `Alt-i` 显示 A 的会话；在 B 文件按 `Alt-i` 会把同一个右侧分屏切换成 B 的会话，各自的历史、图片、用量独立保存。同一个 tab 里始终只有一个 chat 分屏；切换文件后再按 `Alt-i` 即可换回。
 
 ### Shift+Enter 换行（终端设置）
 
@@ -152,7 +152,7 @@ micro 本身只做 Markdown 语法高亮，不渲染排版。编辑文件时按 
 | `shinny.showthinking` | `false` |
 | `shinny.imagedetail` | `auto` |
 | `shinny.imagemaxmb` | `12` |
-| `shinny.chattab` | `true` |
+
 | `shinny.endpoint` / `shinny.deepseektoolsurl` / `shinny.chaturl` | 官方地址 |
 
 ## 外观
