@@ -1,4 +1,4 @@
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -2373,6 +2373,7 @@ local function render_help()
 	add("- `Alt-s` — 搜索选区（等同 `> shinny`）")
 	add("- `Alt-i` — 打开 / 聚焦当前文件的 chat 输入栏")
 	add("- `Esc` — 生成过程中停止")
+	add("- `Alt-r` — 打开 / 刷新当前 Markdown 的渲染预览")
 	add("- `Shift+Enter` — 输入栏内换行（终端需映射为 Alt-Enter，见 README）")
 	add("")
 	add("## 搜索")
@@ -2982,5 +2983,6 @@ function init()
 
 	config.TryBindKey("Alt-i", "command:shinny-chat", false)
 	config.TryBindKey("Alt-Enter", "command:shinny-chat-newline", false)
+	config.TryBindKey("Alt-r", "command:shinny-preview", false)
 	start_input_watch()
 end
