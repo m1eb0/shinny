@@ -1,4 +1,4 @@
-VERSION = "0.7.5"
+VERSION = "0.7.6"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -1858,8 +1858,10 @@ local handle_stream_chunk
 local handle_stream_exit
 local finalize_cancel
 
-local STREAM_CMD = 'curl -sS -N --max-time 1800 -X POST "$SHINNY_ENDPOINT"'
+local STREAM_CMD = 'curl -sS -N --http1.1 --keepalive-time 30 --max-time 1800 -X POST "$SHINNY_ENDPOINT"'
 	.. ' -H "Content-Type: application/json"'
+	.. ' -H "Accept: text/event-stream"'
+	.. ' -H "Accept-Encoding: identity"'
 	.. ' -H "Authorization: Bearer $SHINNY_KEY"'
 	.. ' --data-binary @"$SHINNY_BODY_FILE"'
 	.. ' -w "\\n' .. STATUS_MARKER .. ':%{http_code}"'
@@ -1917,8 +1919,8 @@ function start_request(chat)
 		chat.log_truncated = false
 		local st = chat_settings()
 		log_append(chat, string.format(
-			"=== shinny stream ===\nkey=%s\nmodel=%s thinking=%s effort=%s max_tokens=%s messages=%d body_bytes=%d\n",
-			tostr(chat.key), st.model, tostring(st.thinking), st.effort, tostring(st.max_tokens), #chat.messages, #body
+			"=== shinny stream ===\ntick=%d\nkey=%s\nmodel=%s thinking=%s effort=%s max_tokens=%s messages=%d body_bytes=%d\n",
+			TICK, tostr(chat.key), st.model, tostring(st.thinking), st.effort, tostring(st.max_tokens), #chat.messages, #body
 		))
 		pcall(os.MkdirAll, log_dir(), 448)
 	else
@@ -1977,7 +1979,7 @@ function handle_stream_chunk(chat, chunk)
 	chat.last_activity = TICK
 	if chat.log_parts ~= nil then
 		chat.log_chunks = (chat.log_chunks or 0) + 1
-		log_append(chat, string.format("[chunk %d bytes=%d]\n", chat.log_chunks, #tostr(chunk)))
+		log_append(chat, string.format("[chunk %d tick=%d bytes=%d]\n", chat.log_chunks, TICK, #tostr(chunk)))
 		log_append(chat, tostr(chunk))
 		log_append(chat, "\n")
 	end
@@ -2069,7 +2071,8 @@ local function watch_chats()
 	for _, chat in pairs(chats) do
 		if chat.streaming and chat.job ~= nil then
 			local last = chat.last_activity or TICK
-			if TICK - last >= 12 then
+			local limit = math.max(2, math.floor(option_number("streamtimeout", 60) / 5))
+			if TICK - last >= limit then
 				chat.timeout = true
 				local job = chat.job
 				chat.job = nil
@@ -3373,6 +3376,7 @@ function init()
 	config.RegisterGlobalOption("shinny", "effort", DEFAULT_EFFORT)
 	config.RegisterGlobalOption("shinny", "maxtokens", 65536)
 	config.RegisterGlobalOption("shinny", "debug", true)
+	config.RegisterGlobalOption("shinny", "streamtimeout", 60)
 	config.RegisterGlobalOption("shinny", "chattokenbudget", 24000)
 	config.RegisterGlobalOption("shinny", "showthinking", false)
 	config.RegisterGlobalOption("shinny", "imagedetail", "auto")

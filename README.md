@@ -99,7 +99,9 @@ Chat 是流式的：回答边生成边显示，`Esc` 停止；思考内容单独
 
 请求默认带 `max_tokens: 65536`（`shinny.maxtokens` 可调），避免非 thinking 模式默认 8K 输出上限把长回答截断。
 
-调试日志默认开启（`shinny.debug`）：每次请求把元数据、原始 SSE chunk、退出状态、`finish_reason` 和内容长度写到 `~/.config/micro/shinny/logs/last-stream.log`，上限 800KB，最后一次请求覆盖前一次。`> shinny-log` 可以直接在新 tab 打开查看。会话按文件持久化在 `~/.config/micro/shinny/chats/`，重启 micro 能恢复；顶部显示 token 用量和 cache 命中率，`> shinny-usage` 查看累计值，`> shinny-chat-new` 清空会话。上下文按 `shinny.chattokenbudget`（token 估算）裁剪；system prompt 固定、易变上下文注入最新一条 user 消息，以尽量命中 DeepSeek 的前缀缓存。
+调试日志默认开启（`shinny.debug`）：每次请求把元数据、带 tick 的原始 SSE chunk、退出状态、`finish_reason` 和内容长度写到 `~/.config/micro/shinny/logs/last-stream.log`，上限 800KB，最后一次请求覆盖前一次。`> shinny-log` 可以直接在新 tab 打开查看。
+
+流式请求固定走 HTTP/1.1，并带 `Accept: text/event-stream` / `Accept-Encoding: identity`，减少代理缓冲/HTTP2 连接卡住导致的“输出一半没数据”。无数据超过 `shinny.streamtimeout`（默认 60 秒）会停止并保留部分内容。会话按文件持久化在 `~/.config/micro/shinny/chats/`，重启 micro 能恢复；顶部显示 token 用量和 cache 命中率，`> shinny-usage` 查看累计值，`> shinny-chat-new` 清空会话。上下文按 `shinny.chattokenbudget`（token 估算）裁剪；system prompt 固定、易变上下文注入最新一条 user 消息，以尽量命中 DeepSeek 的前缀缓存。
 
 ### Markdown 预览
 
@@ -160,6 +162,7 @@ micro 本身只做 Markdown 语法高亮，不渲染排版。编辑文件时按 
 | `shinny.imagemaxmb` | `12` |
 | `shinny.maxtokens` | `65536` |
 | `shinny.debug` | `true` |
+| `shinny.streamtimeout` | `60` |
 
 | `shinny.endpoint` / `shinny.deepseektoolsurl` / `shinny.chaturl` | 官方地址 |
 
