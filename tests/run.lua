@@ -753,6 +753,16 @@ test("Enter in the input pane sends the question and applies a rewrite", functio
 	assert_contains(input_pane().Buf:text(), "> ")
 end)
 
+test("shift+enter inserts a newline in the chat input", function()
+	local bp = setup_search("tavily")
+	run(shinny_chat, bp, nil)
+	local pane = set_input("abc")
+	pane.Cursor.X, pane.Cursor.Y = 5, 0
+	state.commands["shinny-chat-newline"](pane, nil)
+	assert_contains(pane.Buf:text(), "abc\n")
+	assert_true(#state.chat_bodies == 0, "newline must not send the message")
+end)
+
 test("chat applies cursor insert and line replacement", function()
 	local bp = setup_search("tavily")
 	bp.Cursor.sel = { { X = 0, Y = 0 }, { X = 0, Y = 0 } }

@@ -30,7 +30,9 @@
 
 ## LLM Chat
 
-在任意文件里按 `Alt-i`：右侧打开这个文件专属的 chat 分屏，上方是对话记录，下方是输入栏（`>`）。直接输入问题，按 Enter 发送；再按 `Alt-i` 会把焦点带回输入栏。
+在任意文件里按 `Alt-i`：右侧打开这个文件专属的 chat 分屏，上方是对话记录，下方是输入栏（`>`）。直接输入问题，按 Enter 发送，`Shift+Enter` 换行；再按 `Alt-i` 会把焦点带回输入栏。
+
+> `Shift+Enter` 需要终端把它映射成 `Alt-Enter`。Ghostty 在 `~/.config/ghostty/config.ghostty` 写 `keybind = shift+enter=text:\x1b\r`，然后 `ctrl+shift+,` 重载配置。原因：micro 2.0.15 的 tcell 还不认识 Ghostty 默认发的 `CSI 27;2;13~`，会把 `ESC [` 当成 `Alt-[` 从而跳到 buffer 开头。插件已把 `Alt-Enter` 绑定到输入栏换行。
 
 Chat 能看到：
 
@@ -102,6 +104,7 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny-chat-new` | 清空当前文件的会话 |
 | `shinny-usage` | 显示本次会话的 token / cache 用量 |
 | `shinny-chat-stop` | 停止正在生成的回复（同 `Esc`） |
+| `shinny-chat-newline` | 在输入栏插入换行（`Alt-Enter` 绑定） |
 | `shinny-image [path]` | 附加图片到下一问；不带参数读剪贴板 |
 | `shinny-image-url <url>` | 附加公网图片 URL |
 | `shinny-image-detail <level>` | 设置图片 detail |

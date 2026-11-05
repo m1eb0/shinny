@@ -1,4 +1,4 @@
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -2307,6 +2307,7 @@ local function render_help()
 	add("- `Alt-s` — 搜索选区（等同 `> shinny`）")
 	add("- `Alt-i` — 打开 / 聚焦当前文件的 chat 输入栏")
 	add("- `Esc` — 生成过程中停止")
+	add("- `Shift+Enter` — 输入栏内换行（终端需映射为 Alt-Enter，见 README）")
 	add("")
 	add("## 搜索")
 	add("")
@@ -2319,6 +2320,7 @@ local function render_help()
 	add("- `Alt-i` 打开该文件专属的分屏：上方对话记录，下方 `>` 输入栏")
 	add("- 在输入栏输入问题，`Enter` 发送；再按 `Alt-i` 回到输入栏")
 	add("- 流式输出；回答和思考过程分开处理，思考内容可选显示")
+	add("- 输入栏 Enter 发送，Shift+Enter 换行（终端映射为 Alt-Enter 后生效）")
 	add("- Chat 能看到所有打开的文件、光标位置、选区和最近一次搜索结果")
 	add("- 模型通过 function calling 直接修改文件（`Ctrl-Z` 可撤销）")
 	add("- 会话按文件保存到 `~/.config/micro/shinny/chats`，重启可恢复")
@@ -2681,6 +2683,22 @@ function shinny_chat_stop(bp, args)
 	micro.InfoBar():Message("shinny: 正在停止…")
 end
 
+function shinny_chat_newline(bp, args)
+	if bp == nil then
+		return
+	end
+	local chat = chats_by_input[tostr(bp.Buf:GetName())]
+	if chat == nil then
+		return
+	end
+	local cursor = bp.Cursor
+	local y = cursor.Y
+	bp.Buf:Insert(buffer.Loc(cursor.X, y), "\n")
+	pcall(function()
+		cursor:GotoLoc(buffer.Loc(0, y + 1))
+	end)
+end
+
 function shinny_chat(bp, args)
 	if bp == nil then
 		micro.InfoBar():Error("shinny: 没有活动窗格")
@@ -2751,6 +2769,7 @@ function init()
 	config.MakeCommand("shinny-image-url", shinny_image_url, config.NoComplete)
 	config.MakeCommand("shinny-image-clear", shinny_image_clear, config.NoComplete)
 	config.MakeCommand("shinny-image-detail", shinny_image_detail, config.NoComplete)
+	config.MakeCommand("shinny-chat-newline", shinny_chat_newline, config.NoComplete)
 	config.MakeCommand("shinny-model", shinny_model, config.NoComplete)
 	config.MakeCommand("shinny-thinking", shinny_thinking, config.NoComplete)
 	config.MakeCommand("shinny-effort", shinny_effort, config.NoComplete)
@@ -2760,4 +2779,5 @@ function init()
 	config.AddRuntimeFile("shinny", config.RTSyntax, "syntax/shinnyresults.yaml")
 
 	config.TryBindKey("Alt-i", "command:shinny-chat", false)
+	config.TryBindKey("Alt-Enter", "command:shinny-chat-newline", false)
 end

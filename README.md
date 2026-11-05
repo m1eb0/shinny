@@ -61,7 +61,22 @@ DeepSeek 搜索走官方 `POST /v1/tools/search`，需要 DeepSeek key；两个�
 
 ### Chat
 
-在文件里按 `Alt-i`：右侧出现这个文件专属的聊天分屏——上方是对话记录，下方是输入栏（`>`）。直接输入问题，Enter 发送；再按 `Alt-i` 把焦点带回输入栏。
+在文件里按 `Alt-i`：右侧出现这个文件专属的聊天分屏——上方是对话记录，下方是输入栏（`>`）。直接输入问题，Enter 发送，`Shift+Enter` 换行；再按 `Alt-i` 把焦点带回输入栏。
+
+### Shift+Enter 换行（终端设置）
+
+micro 2.0.15 的 tcell 还无法解码 Ghostty 默认发送的 `CSI 27;2;13~`：`ESC [` 会被当成 `Alt-[`，触发 `DiffPrevious|CursorStart` 并插入残余字符。所以需要让终端把 `Shift+Enter` 发成 micro 认识的 `ESC` + `Enter`（即 `Alt-Enter`），插件再把 `Alt-Enter` 绑定到输入栏换行：
+
+    # ~/.config/ghostty/config.ghostty
+    keybind = shift+enter=text:\x1b\r
+
+改完在 Ghostty 里按 `ctrl+shift+,` 重载配置（或重启 Ghostty），再重启 micro 让插件重新注册绑定。之后：
+
+- 输入栏里 `Enter` 发送
+- `Shift+Enter` 在当前光标处换行
+- 普通编辑区里 `Shift+Enter` 仍是换行
+
+其他终端也可以把 `Shift+Enter` 映射为 `ESC` + `CR`；对应地，插件的 `shinny-chat-newline` 命令也可以手动绑定。
 
 Chat 的上下文包括：
 
@@ -106,6 +121,7 @@ Chat 是流式的：回答边生成边显示，`Esc` 停止；思考内容单独
 | `shinny-chat-new` | 清空当前文件的会话 |
 | `shinny-usage` | 显示 token / cache 用量 |
 | `shinny-chat-stop` | 停止生成（同 `Esc`） |
+| `shinny-chat-newline` | 输入栏换行（`Alt-Enter`） |
 | `shinny-image [path]` | 附加图片到下一问；不带参数读剪贴板 |
 | `shinny-image-url <url>` | 附加公网图片 URL |
 | `shinny-image-detail <level>` | 设置图片 detail |
@@ -142,7 +158,7 @@ chat 分屏、输入栏、搜索结果和帮助页都带语法高亮（角色、
 ## 开发
 
 ```sh
-make test    # 23 个 headless 测试 + 2 个走本地 mock 的端到端测试
+make test    # 24 个 headless 测试 + 2 个走本地 mock 的端到端测试
 ```
 
 `tests/run.lua` 用假的 micro API 跑逻辑；`tests/integration.sh` 启动
