@@ -1,4 +1,4 @@
-VERSION = "0.6.3"
+VERSION = "0.7.0"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -51,6 +51,8 @@ local last_search_query = ""
 -- Per-file chat state, keyed by the chat buffer name.
 local chats = {}
 local chats_by_input = {}
+local chats_by_key = {}
+local PROCESS_TOKEN = (tostring({}):match("0x(%x+)") or tostring(math.random(100000, 999999)))
 
 local function tostr(v)
 	if v == nil then
@@ -1325,13 +1327,17 @@ local function chat_dir()
 	return config.ConfigDir .. "/shinny/chats"
 end
 
+local function hash_key(key)
+	local sum = 0
+	for i = 1, #key do
+		sum = (sum * 31 + key:byte(i)) % 1000000007
+	end
+	return sum
+end
+
 local function chat_file(chat)
 	local base = tostr(chat.label):gsub("[^%w_.-]", "_")
-	local sum = 0
-	for i = 1, #chat.key do
-		sum = (sum * 31 + chat.key:byte(i)) % 1000000007
-	end
-	return chat_dir() .. "/" .. base .. "-" .. tostring(sum) .. ".json"
+	return chat_dir() .. "/" .. base .. "-" .. tostring(hash_key(chat.key)) .. ".json"
 end
 
 local function save_chat(chat)
@@ -1919,7 +1925,7 @@ function start_request(chat)
 
 	REQ_SEQ = (REQ_SEQ or 0) + 1
 	chat.req_seq = REQ_SEQ
-	local body_path = chat_dir() .. "/request-" .. tostring(REQ_SEQ) .. ".json"
+	local body_path = chat_dir() .. "/request-" .. PROCESS_TOKEN .. "-" .. tostring(hash_key(chat.key)) .. "-" .. tostring(REQ_SEQ) .. ".json"
 	pcall(os.MkdirAll, chat_dir(), 448)
 	local wrote = pcall(ioutil.WriteFile, body_path, body, 384)
 	if not wrote then
@@ -2233,7 +2239,7 @@ function resize_chat_input(chat)
 	end
 	local h = 0
 	pcall(function()
-		h = chat.src_pane:Tab().H
+		h = chat.ipane:Tab().H
 	end)
 	if type(h) ~= "number" or h <= lines + 2 then
 		return
@@ -2268,13 +2274,35 @@ local function ensure_chat_panes(bp, chat)
 	local ipane = find_pane_by_name(chat.input_name)
 
 	if tpane == nil then
-		local tbuf = buffer.NewBuffer("", "")
-		tbuf:SetName(chat.name)
-		chat.buf = tbuf
-		chat.text = ""
-		tpane = bp:VSplitIndex(tbuf, true)
+		if option_bool("chattab", true) then
+			local ok = pcall(function()
+				bp:AddTab()
+			end)
+			if ok then
+				local tabs = micro.Tabs()
+				local tab = tabs.List[#tabs.List]
+				tpane = tab and tab.Panes[1]
+				if tpane ~= nil and tpane.Buf ~= nil then
+					chat.buf = tpane.Buf
+					chat.text = ""
+					pcall(function()
+						chat.buf:SetName(chat.name)
+					end)
+				else
+					tpane = nil
+				end
+			end
+		end
+		if tpane == nil then
+			local tbuf = buffer.NewBuffer("", "")
+			tbuf:SetName(chat.name)
+			chat.buf = tbuf
+			chat.text = ""
+			tpane = bp:VSplitIndex(tbuf, true)
+		end
 		chat.pane = tpane
 	end
+	chat.pane = tpane
 
 	if ipane == nil then
 		if chat.ibuf == nil then
@@ -2389,6 +2417,16 @@ local function chat_for(bp)
 	else
 		key = name
 	end
+	local known = chats_by_key[key]
+	if known ~= nil then
+		known.src_pane = bp
+		if known.input_name == nil then
+			known.input_name = CHAT_INPUT_PREFIX .. known.name:sub(#CHAT_PREFIX + 1)
+		end
+		chats_by_input[known.input_name] = known
+		return known
+	end
+
 	local label = chat_label(name)
 	local chat_name = CHAT_PREFIX .. label
 	local chat = chats[chat_name]
@@ -2422,6 +2460,7 @@ local function chat_for(bp)
 			retries = 0,
 		}
 		chats[chat_name] = chat
+		chats_by_key[key] = chat
 		load_chat(chat)
 	else
 		chat.src_pane = bp
@@ -2464,7 +2503,7 @@ local function render_help()
 	add("")
 	add("## Chat")
 	add("")
-	add("- `Alt-i` 打开该文件专属的分屏：上方对话记录，下方 `>` 输入栏")
+	add("- `Alt-i` 打开该文件专属的 chat tab：上方对话记录，下方 `>` 输入栏（不同文件相互隔离）")
 	add("- 在输入栏输入问题，`Enter` 发送；再按 `Alt-i` 回到输入栏")
 	add("- 流式输出；回答和思考过程分开处理，思考内容可选显示")
 	add("- 输入栏 Enter 发送，Shift+Enter 换行（终端映射为 Alt-Enter 后生效）")
@@ -2472,7 +2511,7 @@ local function render_help()
 	add("- 模型通过 function calling 直接修改文件（`Ctrl-Z` 可撤销）")
 	add("- 会话按文件保存到 `~/.config/micro/shinny/chats`，重启可恢复")
 	add("- 底部会显示 token 用量和 cache 命中率")
-	add("- `> shinny-preview` 用 `rich` 渲染当前 buffer 或最后一条回答（只读分屏）")
+	add("- `> shinny-preview` 用 `rich` 渲染当前 buffer 或最后一条回答（新 tab）")
 	add("- 支持图片输入（PNG / JPEG / GIF / WebP）：`> shinny-image ~/shot.png`，或直接 `> shinny-image` 读剪贴板；图片随下一条消息发送")
 	add("")
 	add("## 命令")
@@ -2487,7 +2526,7 @@ local function render_help()
 	add("- `shinny-effort [low|high|max]` — 查看/设置思考强度")
 	add("- `shinny-chat-new` — 清空当前文件的会话")
 	add("- `shinny-usage` — 显示 token / cache 用量")
-	add("- `shinny-preview` — 把当前 Markdown 或最后一条回答渲染到只读分屏")
+	add("- `shinny-preview` — 把当前 Markdown 或最后一条回答渲染到新 tab")
 	add("- `shinny-chat-stop` — 停止正在生成的回复")
 	add("- `shinny-image [path]` — 附加图片到下一问（不带参数读剪贴板）")
 	add("- `shinny-image-url <url>` — 附加公网图片 URL")
@@ -3084,6 +3123,7 @@ function init()
 	config.RegisterGlobalOption("shinny", "effort", DEFAULT_EFFORT)
 	config.RegisterGlobalOption("shinny", "chatcontext", 24000)
 	config.RegisterGlobalOption("shinny", "chattokenbudget", 24000)
+	config.RegisterGlobalOption("shinny", "chattab", true)
 	config.RegisterGlobalOption("shinny", "showthinking", false)
 	config.RegisterGlobalOption("shinny", "imagedetail", "auto")
 	config.RegisterGlobalOption("shinny", "imagemaxmb", 12)

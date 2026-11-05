@@ -979,6 +979,36 @@ test("supports external image URLs and detail", function()
 	assert_contains(state.chat_bodies[1], '"detail":"low"')
 end)
 
+test("chats from different files are isolated", function()
+	reset()
+	local bpA = new_pane(new_buffer("A\n", "/tmp/isoA.md"))
+	state.chat_sse = CHAT_TEXT
+	run(shinny_chat, bpA, nil)
+	ask("question A")
+
+	local bpB = new_pane(new_buffer("B\n", "/tmp/isoB.md"))
+	run(shinny_chat, bpB, nil)
+	ask("question B")
+
+	assert_true(#state.chat_bodies == 2, "expected two requests")
+	assert_contains(state.chat_bodies[1], "question A")
+	assert_contains(state.chat_bodies[2], "question B")
+
+	local textA, textB = "", ""
+	for _, pane in ipairs(state.panes) do
+		local n = pane.Buf:GetName()
+		if n == "shinny chat · isoA.md" then
+			textA = pane.Buf:text()
+		elseif n == "shinny chat · isoB.md" then
+			textB = pane.Buf:text()
+		end
+	end
+	assert_contains(textA, "question A")
+	assert_true(not textA:find("question B", 1, true), "A leaked B")
+	assert_contains(textB, "question B")
+	assert_true(not textB:find("question A", 1, true), "B leaked A")
+end)
+
 test("chat persists the conversation to disk", function()
 	local bp = setup_search("tavily")
 	state.chat_sse = CHAT_TEXT
