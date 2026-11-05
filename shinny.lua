@@ -1,4 +1,4 @@
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -17,6 +17,8 @@ local fmt = import("fmt")
 local DEFAULT_ENDPOINT = "https://api.tavily.com/search"
 local DEFAULT_DS_SEARCH = "https://api.deepseek.com/v1/tools/search"
 local DEFAULT_DS_CHAT = "https://api.deepseek.com/chat/completions"
+local DEFAULT_MODEL = "deepseek-flash"
+local DEFAULT_EFFORT = "high"
 local DEFAULT_DEPTH = "basic"
 local DEFAULT_PREFIX = "什么是"
 local MAX_QUERY_BYTES = 380
@@ -33,6 +35,9 @@ local runtime = {
 	prefix = DEFAULT_PREFIX,
 	suffix = "",
 	backend = "tavily",
+	model = DEFAULT_MODEL,
+	thinking = true,
+	effort = DEFAULT_EFFORT,
 	loaded = false,
 }
 
@@ -451,15 +456,29 @@ local function load_state()
 	if type(obj.backend) == "string" and obj.backend ~= "" then
 		runtime.backend = obj.backend
 	end
+	if type(obj.model) == "string" and obj.model ~= "" then
+		runtime.model = obj.model
+	end
+	if type(obj.thinking) == "boolean" then
+		runtime.thinking = obj.thinking
+	elseif type(obj.thinking) == "string" then
+		runtime.thinking = obj.thinking == "true"
+	end
+	if type(obj.effort) == "string" and obj.effort ~= "" then
+		runtime.effort = obj.effort
+	end
 	runtime.loaded = true
 end
 
 local function save_state()
 	local text = string.format(
-		'{\n    "prefix": "%s",\n    "suffix": "%s",\n    "backend": "%s"\n}\n',
+		'{\n    "prefix": "%s",\n    "suffix": "%s",\n    "backend": "%s",\n    "model": "%s",\n    "thinking": %s,\n    "effort": "%s"\n}\n',
 		json_escape(runtime.prefix),
 		json_escape(runtime.suffix),
-		json_escape(runtime.backend)
+		json_escape(runtime.backend),
+		json_escape(runtime.model),
+		tostr(runtime.thinking),
+		json_escape(runtime.effort)
 	)
 	local ok, err = pcall(ioutil.WriteFile, STATE_PATH, text, 384)
 	if not ok then
@@ -474,12 +493,15 @@ local function apply_state()
 	pcall(config.SetGlobalOption, "shinny.prefix", runtime.prefix)
 	pcall(config.SetGlobalOption, "shinny.suffix", runtime.suffix)
 	pcall(config.SetGlobalOption, "shinny.backend", runtime.backend)
+	pcall(config.SetGlobalOption, "shinny.chatmodel", runtime.model)
+	pcall(config.SetGlobalOption, "shinny.thinking", tostr(runtime.thinking))
+	pcall(config.SetGlobalOption, "shinny.effort", runtime.effort)
 end
 
-local function set_setting(name, value)
+local function set_setting(name, value, option_name)
 	runtime[name] = value
 	save_state()
-	pcall(config.SetGlobalOption, "shinny." .. name, tostr(value))
+	pcall(config.SetGlobalOption, "shinny." .. (option_name or name), tostr(value))
 end
 
 -- ---------------------------------------------------------------------------
@@ -1120,20 +1142,20 @@ local function chat_label(name)
 	return name:match("([^/\\]+)$") or name
 end
 
+local chat_settings
+
 local function render_chat(chat)
 	local out = {}
 	local function add(line)
 		out[#out + 1] = line
 	end
-	local model = trim(tostr(option("chatmodel", "deepseek-chat")))
-	if model == "" then
-		model = "deepseek-chat"
-	end
+	local settings = chat_settings()
+	local thinking_label = settings.thinking and ("thinking " .. settings.effort) or "no thinking"
 	local rule = string.rep("─", 30)
 
 	add(rule)
 	add(" shinny chat · " .. chat.label)
-	add(string.format(" %s · %d files", model, #open_buffers()))
+	add(string.format(" %s · %s · %d files", settings.model, thinking_label, #open_buffers()))
 	add(rule)
 	add("")
 
@@ -1208,11 +1230,31 @@ local function chat_key()
 	return trim(tostr(option("deepseekkey", "")))
 end
 
-local function chat_body(chat, context)
-	local model = trim(tostr(option("chatmodel", "deepseek-chat")))
-	if model == "" then
-		model = "deepseek-chat"
+local function normalize_effort(value)
+	value = trim(tostr(value)):lower()
+	if value == "minimal" or value == "medium" or value == "xhigh" then
+		return value == "minimal" and "low" or "high"
 	end
+	if value ~= "low" and value ~= "high" and value ~= "max" then
+		return DEFAULT_EFFORT
+	end
+	return value
+end
+
+function chat_settings()
+	local model = trim(tostr(option("chatmodel", DEFAULT_MODEL)))
+	if model == "" then
+		model = DEFAULT_MODEL
+	end
+	return {
+		model = model,
+		thinking = option_bool("thinking", true),
+		effort = normalize_effort(option("effort", DEFAULT_EFFORT)),
+	}
+end
+
+local function chat_body(chat, context)
+	local settings = chat_settings()
 	local msgs = {}
 	local function add(role, content)
 		msgs[#msgs + 1] = string.format('{"role":"%s","content":"%s"}', role, json_escape(content))
@@ -1222,11 +1264,19 @@ local function chat_body(chat, context)
 	for i = start, #chat.messages do
 		add(chat.messages[i].role, chat.messages[i].content)
 	end
-	return string.format(
-		'{"model":"%s","messages":[%s],"temperature":0.3,"stream":false}',
-		json_escape(model),
-		table.concat(msgs, ",")
-	)
+
+	local parts = {
+		'"model":"' .. json_escape(settings.model) .. '"',
+		'"messages":[' .. table.concat(msgs, ",") .. ']',
+		'"stream":false',
+	}
+	if settings.thinking then
+		parts[#parts + 1] = '"thinking":{"type":"enabled"}'
+		parts[#parts + 1] = '"reasoning_effort":"' .. json_escape(settings.effort) .. '"'
+	else
+		parts[#parts + 1] = '"thinking":{"type":"disabled"}'
+	end
+	return "{" .. table.concat(parts, ",") .. "}"
 end
 
 local function append_message(chat, role, content)
@@ -1545,6 +1595,57 @@ function shinny_backend(bp, args)
 	micro.InfoBar():Message("shinny: backend = " .. value)
 end
 
+function shinny_model(bp, args)
+	local value = trim(join_args(args))
+	if value == "" then
+		micro.InfoBar():Message("shinny: model = " .. chat_settings().model .. "（deepseek-flash | deepseek-v4-pro）")
+		return
+	end
+	set_setting("model", value, "chatmodel")
+	micro.InfoBar():Message("shinny: model = " .. value)
+end
+
+function shinny_thinking(bp, args)
+	local value = trim(join_args(args)):lower()
+	if value == "" then
+		local settings = chat_settings()
+		micro.InfoBar():Message(
+			"shinny: thinking = " .. (settings.thinking and ("on · effort " .. settings.effort) or "off")
+		)
+		return
+	end
+	local on
+	if value == "on" or value == "true" or value == "1" then
+		on = true
+	elseif value == "off" or value == "false" or value == "0" then
+		on = false
+	else
+		micro.InfoBar():Error("shinny: thinking 只能是 on 或 off")
+		return
+	end
+	set_setting("thinking", on)
+	micro.InfoBar():Message("shinny: thinking = " .. (on and "on" or "off"))
+end
+
+function shinny_effort(bp, args)
+	local value = trim(join_args(args)):lower()
+	if value == "" then
+		micro.InfoBar():Message("shinny: effort = " .. chat_settings().effort .. "（low | high | max）")
+		return
+	end
+	if value == "minimal" then
+		value = "low"
+	elseif value == "medium" or value == "xhigh" then
+		value = "high"
+	end
+	if value ~= "low" and value ~= "high" and value ~= "max" then
+		micro.InfoBar():Error("shinny: effort 只能是 low | high | max")
+		return
+	end
+	set_setting("effort", value)
+	micro.InfoBar():Message("shinny: effort = " .. value)
+end
+
 function shinny_chat(bp, args)
 	if bp == nil then
 		micro.InfoBar():Error("shinny: 没有活动窗格")
@@ -1590,7 +1691,9 @@ function init()
 	config.RegisterGlobalOption("shinny", "deepseekkey", "")
 	config.RegisterGlobalOption("shinny", "deepseektoolsurl", DEFAULT_DS_SEARCH)
 	config.RegisterGlobalOption("shinny", "chaturl", DEFAULT_DS_CHAT)
-	config.RegisterGlobalOption("shinny", "chatmodel", "deepseek-chat")
+	config.RegisterGlobalOption("shinny", "chatmodel", DEFAULT_MODEL)
+	config.RegisterGlobalOption("shinny", "thinking", true)
+	config.RegisterGlobalOption("shinny", "effort", DEFAULT_EFFORT)
 	config.RegisterGlobalOption("shinny", "chatcontext", 24000)
 
 	apply_state()
@@ -1601,6 +1704,9 @@ function init()
 	config.MakeCommand("shinny-suffix", shinny_suffix, config.NoComplete)
 	config.MakeCommand("shinny-backend", shinny_backend, config.NoComplete)
 	config.MakeCommand("shinny-chat", shinny_chat, config.NoComplete)
+	config.MakeCommand("shinny-model", shinny_model, config.NoComplete)
+	config.MakeCommand("shinny-thinking", shinny_thinking, config.NoComplete)
+	config.MakeCommand("shinny-effort", shinny_effort, config.NoComplete)
 	config.AddRuntimeFile("shinny", config.RTHelp, "help/shinny.md")
 
 	config.TryBindKey("Alt-i", "command:shinny-chat", false)

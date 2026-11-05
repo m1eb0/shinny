@@ -510,7 +510,9 @@ local function setup_search(backend)
 	state.options["shinny.endpoint"] = integration and integration.tavily or "https://api.tavily.com/search"
 	state.options["shinny.deepseektoolsurl"] = integration and integration.search or "https://api.deepseek.com/v1/tools/search"
 	state.options["shinny.chaturl"] = integration and integration.chat or "https://api.deepseek.com/chat/completions"
-	state.options["shinny.chatmodel"] = "deepseek-chat"
+	state.options["shinny.chatmodel"] = "deepseek-flash"
+	state.options["shinny.thinking"] = true
+	state.options["shinny.effort"] = "high"
 	local bp = new_pane(new_buffer("NVME集群\n", "/tmp/notes.md"))
 	bp.Cursor.sel = { { X = 0, Y = 0 }, { X = 10, Y = 0 } }
 	state.pane = bp
@@ -678,6 +680,58 @@ test("Alt-i focuses the input pane on an existing chat", function()
 	local before = #state.panes
 	run(shinny_chat, bp, nil)
 	assert_true(#state.panes == before, "Alt-i must not create another chat")
+end)
+
+test("sends the model and thinking settings", function()
+	local bp = setup_search("tavily")
+	state.chat_output = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
+	run(shinny_chat, bp, nil)
+	ask("你好")
+
+	assert_contains(state.job_env.BODY, '"model":"deepseek-flash"')
+	assert_contains(state.job_env.BODY, '"thinking":{"type":"enabled"}')
+	assert_contains(state.job_env.BODY, '"reasoning_effort":"high"')
+	assert_contains(transcript_pane().Buf:text(), "deepseek-flash · thinking high")
+end)
+
+test("shinny-model switches the model and persists it", function()
+	local bp = setup_search("tavily")
+	state.commands["shinny-model"](bp, { "deepseek-v4-pro" })
+	assert_true(state.options["shinny.chatmodel"] == "deepseek-v4-pro", "model option")
+	assert_contains(state.files["/cfg/shinny.json"], '"model": "deepseek-v4-pro"')
+
+	state.chat_output = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
+	run(shinny_chat, bp, nil)
+	ask("你好")
+	assert_contains(state.job_env.BODY, '"model":"deepseek-v4-pro"')
+end)
+
+test("shinny-thinking off disables thinking and effort", function()
+	local bp = setup_search("tavily")
+	state.commands["shinny-thinking"](bp, { "off" })
+	assert_true(state.options["shinny.thinking"] == "false" or state.options["shinny.thinking"] == false, "thinking option")
+
+	state.chat_output = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
+	run(shinny_chat, bp, nil)
+	ask("你好")
+	assert_contains(state.job_env.BODY, '"thinking":{"type":"disabled"}')
+	assert_true(not state.job_env.BODY:find("reasoning_effort", 1, true), "effort sent while thinking disabled")
+	assert_contains(transcript_pane().Buf:text(), "no thinking")
+end)
+
+test("shinny-effort validates and switches effort", function()
+	local bp = setup_search("tavily")
+	state.commands["shinny-effort"](bp, { "max" })
+	assert_true(state.options["shinny.effort"] == "max", "effort option")
+
+	state.chat_output = '{"choices":[{"message":{"content":"ok"}}]}\n__SHINNY_STATUS__:200'
+	run(shinny_chat, bp, nil)
+	ask("你好")
+	assert_contains(state.job_env.BODY, '"reasoning_effort":"max"')
+
+	state.commands["shinny-effort"](bp, { "bogus" })
+	assert_true(state.options["shinny.effort"] == "max", "invalid effort changed the option")
+	assert_contains(last_message(), "low")
 end)
 
 test("tavily HTTP errors are surfaced", function()

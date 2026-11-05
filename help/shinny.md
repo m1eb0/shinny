@@ -52,7 +52,13 @@ Chat 能看到：
 
 target 支持 `selection`（替换选区）、`cursor`（插入到光标处）、`line`（替换光标所在行）。
 
-Chat 使用 DeepSeek Chat API（`deepseek-chat`），与搜索共用同一个 key。
+Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `deepseek-flash`，默认开启思考模式（effort = `high`）。可以随时切换：
+
+    > shinny-model deepseek-v4-pro
+    > shinny-thinking off
+    > shinny-effort max            # low | high | max
+
+模型和思考设置会保存在 `shinny.json`，当前配置显示在 chat 分屏顶部。
 
 ## 快捷键
 
@@ -74,6 +80,9 @@ Chat 使用 DeepSeek Chat API（`deepseek-chat`），与搜索共用同一个 ke
 | `shinny-suffix [text]` | 查看/设置搜索后缀（`-` 清除） |
 | `shinny-backend [tavily\|deepseek]` | 查看/切换搜索后端 |
 | `shinny-chat` | 打开当前文件的 chat 分屏 |
+| `shinny-model [name]` | 查看/切换 chat 模型（`deepseek-flash`、`deepseek-v4-pro`） |
+| `shinny-thinking [on\|off]` | 查看/切换思考模式 |
+| `shinny-effort [low\|high\|max]` | 查看/设置思考强度 |
 | `shinny-raw` | 打开上一次请求的原始响应 |
 
 ## 选项
@@ -90,7 +99,9 @@ Chat 使用 DeepSeek Chat API（`deepseek-chat`），与搜索共用同一个 ke
 | `shinny.endpoint` | Tavily 地址 | 自定义 Tavily 端点 |
 | `shinny.deepseektoolsurl` | DeepSeek Search 地址 | 自定义 DeepSeek 搜索端点 |
 | `shinny.chaturl` | DeepSeek Chat 地址 | 自定义 chat 端点 |
-| `shinny.chatmodel` | `deepseek-chat` | chat 模型 |
+| `shinny.chatmodel` | `deepseek-flash` | chat 模型 |
+| `shinny.thinking` | `true` | 是否开启思考模式 |
+| `shinny.effort` | `high` | 思考强度（low/high/max） |
 | `shinny.chatcontext` | `24000` | 发给 chat 的文件上下文字符预算 |
 
 ## 排错

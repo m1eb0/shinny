@@ -69,7 +69,9 @@ Chat 的上下文包括：
 - 光标所在行/列、选中文本
 - 最近一次搜索的完整结果
 
-可以直接说「解释光标处的代码」「把选区改写成更专业的语言」「把这行改成英文」。模型用 `<<<SHINNY_EDIT selection>>>…<<<SHINNY_EDIT_END>>>` 描述修改，插件立即写入文件：
+可以直接说「解释光标处的代码」「把选区改写成更专业的语言」「把这行改成英文」。
+
+默认模型 `deepseek-flash`、开启思考模式（effort `high`）；用 `shinny-model` / `shinny-thinking` / `shinny-effort` 调整，当前配置显示在 chat 顶部。模型用 `<<<SHINNY_EDIT selection>>>…<<<SHINNY_EDIT_END>>>` 描述修改，插件立即写入文件：
 
 - `selection`：替换当前选区
 - `cursor`：插入到光标处
@@ -86,6 +88,9 @@ Chat 的上下文包括：
 | `shinny-suffix [text]` | 查看/设置后缀 |
 | `shinny-backend [tavily\|deepseek]` | 查看/切换搜索后端 |
 | `shinny-chat` | 打开当前文件的 chat，等同于 `Alt-i` |
+| `shinny-model [name]` | 查看/切换模型 |
+| `shinny-thinking [on\|off]` | 查看/切换思考模式 |
+| `shinny-effort [low\|high\|max]` | 查看/设置思考强度 |
 | `shinny-raw` | 查看上一次请求的原始响应 |
 
 | 选项 | 默认值 |
@@ -95,7 +100,9 @@ Chat 的上下文包括：
 | `shinny.backend` | `tavily` |
 | `shinny.maxresults` | `5` |
 | `shinny.depth` / `shinny.includeanswer` | `basic` / `true` |
-| `shinny.chatmodel` / `shinny.chatcontext` | `deepseek-chat` / `24000` |
+| `shinny.chatmodel` | `deepseek-flash` |
+| `shinny.thinking` / `shinny.effort` | `true` / `high` |
+| `shinny.chatcontext` | `24000` |
 | `shinny.endpoint` / `shinny.deepseektoolsurl` / `shinny.chaturl` | 官方地址 |
 
 ## 实现说明
