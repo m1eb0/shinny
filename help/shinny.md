@@ -43,7 +43,7 @@ Chat **每轮自动注入**：
 * 所有打开文件的路径列表（不注入内容）
 * 最近一次 Tavily / DeepSeek 搜索的结果
 
-文件全文不会每轮注入。需要时模型调用 `read_current_file`、`read_open_file(path)`、`read_file(path)` 或 `list_open_files` 按需读取。
+文件全文不会每轮注入。需要时模型调用 `read_current_file`、`read_open_file(path)`、`read_file(path)` 或 `list_open_files` 按需读取。除首轮外，每条 user 消息开头会注入 `妈妈加油。`（不显示在对话记录里）。
 
 可以直接让它改文件，例如：
 
@@ -56,7 +56,7 @@ Chat **每轮自动注入**：
 Chat 的行为：
 
 * **流式输出**：回答边生成边显示；收到 `[DONE]` 立即收尾；单次请求最长 30 分钟；60 秒无数据会保留部分内容并结束；`finish_reason=length` 或连接中断会标注“回答可能不完整”；`Esc` 可随时停止
-* **调试日志**：默认记录到 `~/.config/micro/shinny/logs/last-stream.log`（带 tick 的原始 SSE、退出状态、finish_reason），用 `> shinny-log` 打开查看；可用 `shinny.debug` 关闭
+* **调试日志**：默认记录 `last-stream.log`（带 tick 的原始 SSE）和 `last-network.log`（chunk/等待/gap 事件 + curl HTTP/DNS/TLS/TTFB/耗时/速度指标），用 `> shinny-log` / `> shinny-netlog` 打开；可用 `shinny.debug` 关闭
 * 流式固定 HTTP/1.1，`shinny.streamtimeout` 控制无数据超时（默认 120 秒）；等待时状态栏显示已等待秒数
 * **思考模式**：`reasoning_content` 单独保存，`shinny.showthinking` 打开后显示
 * **会话持久化**：每个文件的会话保存在 `~/.config/micro/shinny/chats/`，重启 micro 可恢复
@@ -117,7 +117,8 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny-chat-new` | 清空当前文件的会话 |
 | `shinny-usage` | 显示本次会话的 token / cache 用量 |
 | `shinny-preview` | 在新 tab 渲染当前 Markdown（或最后一条回答）（`Alt-r`） |
-| `shinny-log` | 在新 tab 打开上一次请求的调试日志 |
+| `shinny-log` | 在新 tab 打开上一次请求的流日志 |
+| `shinny-netlog` | 在新 tab 打开上一次请求的网络日志 |
 | `shinny-chat-stop` | 停止正在生成的回复（同 `Esc`） |
 | `shinny-chat-newline` | 在输入栏插入换行（`Alt-Enter` 绑定） |
 | `shinny-image [path]` | 附加图片到下一问；不带参数读剪贴板 |

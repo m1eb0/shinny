@@ -1069,6 +1069,37 @@ test("injects the full cursor line and selection", function()
 	assert_true(not state.job_env.BODY:find("second line", 1, true), "file body was injected")
 end)
 
+test("injects the cheer only after the first turn", function()
+	local bp = setup_search("tavily")
+	state.chat_sse = CHAT_TEXT
+	run(shinny_chat, bp, nil)
+	ask("first question")
+	assert_true(not state.chat_bodies[1]:find("妈妈加油", 1, true), "cheer in first turn")
+
+	ask("second question")
+	assert_true(#state.chat_bodies == 2, "expected second request")
+	assert_contains(state.chat_bodies[2], "妈妈加油。")
+	assert_true(not transcript_pane().Buf:text():find("妈妈加油", 1, true), "cheer shown in transcript")
+end)
+
+test("network log records chunk and exit events", function()
+	local bp = setup_search("tavily")
+	state.chat_sse = CHAT_TEXT
+	run(shinny_chat, bp, nil)
+	ask("network")
+
+	local net = nil
+	for path, data in pairs(state.files) do
+		if path:find("/logs/last-network.log", 1, true) then
+			net = data
+		end
+	end
+	assert_true(net ~= nil, "no network log written")
+	assert_contains(net, "shinny net")
+	assert_contains(net, "chunk=1")
+	assert_contains(net, "[net] exit")
+end)
+
 test("chat persists the conversation to disk", function()
 	local bp = setup_search("tavily")
 	state.chat_sse = CHAT_TEXT

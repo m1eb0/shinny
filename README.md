@@ -89,6 +89,8 @@ Chat **每轮自动注入**：
 
 文件全文**不会**每轮注入。需要时模型调用 `read_current_file`（当前文件，含未保存修改）、`read_open_file(path)`（任意打开文件）、`read_file(path)`（磁盘）或 `list_open_files` 按需读取。
 
+除首轮外，每条 user 消息开头会注入 `妈妈加油。`（只发给模型，不显示在对话记录里）。
+
 可以直接说「解释光标处的代码」「把选区改写成更专业的语言」「把这行改成英文」。
 
 默认模型 `deepseek-flash`、开启思考模式（effort `high`）；用 `shinny-model` / `shinny-thinking` / `shinny-effort` 调整，当前配置显示在 chat 顶部。
@@ -99,7 +101,12 @@ Chat 是流式的：回答边生成边显示，`Esc` 停止；思考内容单独
 
 请求默认带 `max_tokens: 65536`（`shinny.maxtokens` 可调），避免非 thinking 模式默认 8K 输出上限把长回答截断。
 
-调试日志默认开启（`shinny.debug`）：每次请求把元数据、带 tick 的原始 SSE chunk、退出状态、`finish_reason` 和内容长度写到 `~/.config/micro/shinny/logs/last-stream.log`，上限 800KB，最后一次请求覆盖前一次。`> shinny-log` 可以直接在新 tab 打开查看。
+调试日志默认开启（`shinny.debug`）：
+
+- `~/.config/micro/shinny/logs/last-stream.log`：元数据、带 tick 的原始 SSE chunk、退出状态、`finish_reason`、内容长度，上限 800KB
+- `~/.config/micro/shinny/logs/last-network.log`：请求元数据、chunk/等待/gap 事件、curl 的 HTTP 版本/DNS/连接/TLS/TTFB/总时长/下载字节/速度等指标
+
+两者最后一次请求覆盖前一次。`> shinny-log` / `> shinny-netlog` 在新 tab 打开。
 
 流式请求固定走 HTTP/1.1，并带 `Accept: text/event-stream` / `Accept-Encoding: identity`，减少代理缓冲/HTTP2 连接卡住导致的“输出一半没数据”。无数据超过 `shinny.streamtimeout`（默认 120 秒）会停止并保留部分内容；等待期间信息栏会显示“等待服务端… Ns（Esc 停止）”。会话按文件持久化在 `~/.config/micro/shinny/chats/`，重启 micro 能恢复；顶部显示 token 用量和 cache 命中率，`> shinny-usage` 查看累计值，`> shinny-chat-new` 清空会话。上下文按 `shinny.chattokenbudget`（token 估算）裁剪；system prompt 固定、易变上下文注入最新一条 user 消息，以尽量命中 DeepSeek 的前缀缓存。
 
@@ -181,7 +188,7 @@ chat 分屏、输入栏、搜索结果 tab 和帮助页都带语法高亮（角�
 ## 开发
 
 ```sh
-make test    # 33 个 headless 测试 + 2 个走本地 mock 的端到端测试
+make test    # 35 个 headless 测试 + 2 个走本地 mock 的端到端测试
 ```
 
 `tests/run.lua` 用假的 micro API 跑逻辑；`tests/integration.sh` 启动

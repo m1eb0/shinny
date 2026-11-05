@@ -1,4 +1,4 @@
-VERSION = "0.7.7"
+VERSION = "0.8.0"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -25,6 +25,8 @@ local MAX_QUERY_BYTES = 380
 local MAX_DS_QUERY_CHARS = 128
 local MAX_SNIPPET_BYTES = 480
 local STATUS_MARKER = "__SHINNY_STATUS__"
+local NET_MARKER = "__SHINNY_NET__"
+local TURN_CHEER = "妈妈加油。"
 local CHAT_PREFIX = "shinny chat · "
 local CHAT_INPUT_PREFIX = "shinny chat input · "
 local INPUT_PROMPT = "> "
@@ -55,6 +57,7 @@ local chats_by_key = {}
 local TICK = 0
 local WATCHDOG_STARTED = false
 local LAST_LOG_PATH = nil
+local LAST_NET_PATH = nil
 local LOG_LIMIT = 800000
 local PROCESS_TOKEN = (tostring({}):match("0x(%x+)") or tostring(math.random(100000, 999999)))
 
@@ -1266,6 +1269,40 @@ local function log_dir()
 	return config.ConfigDir .. "/shinny/logs"
 end
 
+local function net_append(chat, text)
+	if chat == nil or chat.net_parts == nil then
+		return
+	end
+	text = tostr(text)
+	if chat.net_size + #text > 200000 then
+		return
+	end
+	chat.net_parts[#chat.net_parts + 1] = text
+	chat.net_size = chat.net_size + #text
+end
+
+local function net_write(chat)
+	if chat == nil or chat.net_parts == nil then
+		return
+	end
+	local text = table.concat(chat.net_parts)
+	local dir = log_dir()
+	pcall(os.MkdirAll, dir, 448)
+	local path = dir .. "/last-network.log"
+	local ok = pcall(ioutil.WriteFile, path, text, 384)
+	if ok then
+		LAST_NET_PATH = path
+	end
+end
+
+local function net_flush(chat)
+	net_write(chat)
+	if chat ~= nil then
+		chat.net_parts = nil
+		chat.net_size = 0
+	end
+end
+
 local function log_flush(chat)
 	if chat == nil or chat.log_parts == nil then
 		return
@@ -1864,7 +1901,8 @@ local STREAM_CMD = 'curl -sS -N --http1.1 --keepalive-time 30 --max-time 1800 -X
 	.. ' -H "Accept-Encoding: identity"'
 	.. ' -H "Authorization: Bearer $SHINNY_KEY"'
 	.. ' --data-binary @"$SHINNY_BODY_FILE"'
-	.. ' -w "\\n' .. STATUS_MARKER .. ':%{http_code}"'
+	.. ' -w "\\n' .. STATUS_MARKER .. ':%{http_code} ' .. NET_MARKER
+	.. ':%{http_version}|%{time_namelookup}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{time_total}|%{size_download}|%{speed_download}|%{num_connects}"'
 
 local function accumulate_tool_calls(chat, list)
 	for _, d in ipairs(list) do
@@ -1914,6 +1952,8 @@ function start_request(chat)
 	chat.sbuf = ""
 	chat.raw = ""
 	chat.think_bucket = 0
+	REQ_SEQ = (REQ_SEQ or 0) + 1
+	chat.req_seq = REQ_SEQ
 	if option_bool("debug", true) then
 		chat.log_parts = {}
 		chat.log_size = 0
@@ -1924,15 +1964,26 @@ function start_request(chat)
 			TICK, tostr(chat.key), st.model, tostring(st.thinking), st.effort, tostring(st.max_tokens), #chat.messages, #body
 		))
 		pcall(os.MkdirAll, log_dir(), 448)
+		chat.net_parts = {}
+		chat.net_size = 0
+		chat.net_chunks = 0
+		chat.last_net_tick = TICK
+		net_append(chat, string.format(
+			"=== shinny net ===\ntick=%d seq=%d key=%s\nendpoint=%s http=1.1 timeout=%s\nmodel=%s thinking=%s effort=%s max_tokens=%s messages=%d body_bytes=%d\n",
+			TICK, chat.req_seq or 0, tostr(chat.key), url,
+			tostr(option_number("streamtimeout", 120)), st.model, tostring(st.thinking), st.effort,
+			tostring(st.max_tokens), #chat.messages, #body
+		))
+		net_write(chat)
 	else
 		chat.log_parts = nil
 		chat.log_size = 0
+		chat.net_parts = nil
+		chat.net_size = 0
 	end
 	chat.text = render_chat(chat, true)
 	replace_chat_text(chat, chat.text)
 
-	REQ_SEQ = (REQ_SEQ or 0) + 1
-	chat.req_seq = REQ_SEQ
 	local body_path = chat_dir() .. "/request-" .. PROCESS_TOKEN .. "-" .. tostring(hash_key(chat.key)) .. "-" .. tostring(REQ_SEQ) .. ".json"
 	pcall(os.MkdirAll, chat_dir(), 448)
 	local wrote = pcall(ioutil.WriteFile, body_path, body, 384)
@@ -1981,6 +2032,17 @@ function handle_stream_chunk(chat, chunk)
 	chat.waiting_note = nil
 	if chat.log_parts ~= nil then
 		chat.log_chunks = (chat.log_chunks or 0) + 1
+		if chat.net_parts ~= nil then
+			local gap = TICK - (chat.last_net_tick or TICK)
+			chat.net_chunks = (chat.net_chunks or 0) + 1
+			if gap >= 2 then
+				net_append(chat, string.format("[net] tick=%d gap=%ds before chunk %d\n", TICK, gap * 5, chat.net_chunks))
+			end
+			chat.last_net_tick = TICK
+			if chat.net_chunks == 1 or chat.net_chunks % 25 == 0 then
+				net_append(chat, string.format("[net] tick=%d chunk=%d bytes=%d\n", TICK, chat.net_chunks, #tostr(chunk)))
+			end
+		end
 		log_append(chat, string.format("[chunk %d tick=%d bytes=%d]\n", chat.log_chunks, TICK, #tostr(chunk)))
 		log_append(chat, tostr(chunk))
 		log_append(chat, "\n")
@@ -2000,12 +2062,12 @@ function handle_stream_chunk(chat, chunk)
 			if payload == "[DONE]" then
 				chat.stream.done = true
 				chat.stream.finished = true
-				if chat.job ~= nil then
-					pcall(shell.JobStop, chat.job)
-					chat.job = nil
-				end
-				micro.After(0, function()
+				micro.After(1500000000, function()
 					if chat.streaming then
+						if chat.job ~= nil then
+							pcall(shell.JobStop, chat.job)
+							chat.job = nil
+						end
 						handle_stream_exit(chat, "")
 					end
 				end)
@@ -2046,6 +2108,10 @@ function handle_stream_chunk(chat, chunk)
 end
 
 function finalize_timeout(chat)
+	if chat.net_parts ~= nil then
+		net_append(chat, string.format("[net] timeout tick=%d chunks=%d\n", TICK, chat.net_chunks or 0))
+		net_flush(chat)
+	end
 	if chat.log_parts ~= nil then
 		log_append(chat, "\n=== timeout ===\n")
 		log_flush(chat)
@@ -2079,6 +2145,8 @@ local function watch_chats()
 				if chat.waiting_note ~= seconds then
 					chat.waiting_note = seconds
 					micro.InfoBar():Message(string.format("shinny: 等待服务端… %ds（Esc 停止）", seconds))
+					net_append(chat, string.format("[net] waiting tick=%d seconds=%d chunks=%d\n", TICK, seconds, chat.net_chunks or 0))
+					net_write(chat)
 				end
 			end
 			local limit = math.max(2, math.floor(option_number("streamtimeout", 120) / 5))
@@ -2102,6 +2170,10 @@ local function watch_chats()
 end
 
 function finalize_cancel(chat)
+	if chat.net_parts ~= nil then
+		net_append(chat, string.format("[net] canceled tick=%d chunks=%d\n", TICK, chat.net_chunks or 0))
+		net_flush(chat)
+	end
 	if chat.log_parts ~= nil then
 		log_append(chat, "\n=== canceled ===\n")
 		log_flush(chat)
@@ -2133,9 +2205,13 @@ function handle_stream_exit(chat, output)
 		finalize_timeout(chat)
 		return
 	end
+	local rawout = tostr(output)
+	if rawout == "" then
+		rawout = tostr(chat.raw or "")
+	end
 	local status = nil
-	if output ~= nil then
-		local m = tostr(output):match(STATUS_MARKER .. ":(%d+)")
+	if rawout ~= "" then
+		local m = rawout:match(STATUS_MARKER .. ":(%d+)")
 		status = tonumber(m or "")
 	end
 	local partial = chat.stream.content or ""
@@ -2148,6 +2224,15 @@ function handle_stream_exit(chat, output)
 			#partial, #(chat.stream.reasoning or ""), #tools, tostring(chat.canceled), tostring(chat.timeout)
 		))
 		log_flush(chat)
+	end
+	if chat.net_parts ~= nil then
+		local meta = rawout:match(NET_MARKER .. ":([^\n\r]+)") or ""
+		net_append(chat, string.format(
+			"[net] exit tick=%d status=%s finished=%s finish_reason=%s chunks=%d content=%d reasoning=%d meta=%s\n",
+			TICK, tostr(status), tostring(chat.stream.finished), tostr(chat.stream.finish_reason),
+			chat.net_chunks or 0, #partial, #(chat.stream.reasoning or ""), meta ~= "" and meta or "none"
+		))
+		net_flush(chat)
 	end
 
 	if chat.canceled then
@@ -2267,8 +2352,12 @@ local function send_chat(chat, question)
 		return false
 	end
 
+	local first_turn = #chat.messages == 0
 	local context = build_context_block(chat)
 	local api_content = context .. "\n\n[用户问题]\n" .. question
+	if not first_turn then
+		api_content = TURN_CHEER .. "\n\n" .. api_content
+	end
 	local msg = {
 		role = "user",
 		content = api_content,
@@ -2731,7 +2820,7 @@ local function render_help()
 	add("- `shinny-effort [low|high|max]` — 查看/设置思考强度")
 	add("- `shinny-chat-new` — 清空当前文件的会话")
 	add("- `shinny-usage` — 显示 token / cache 用量")
-	add("- `shinny-log` — 打开上一次请求的调试日志")
+	add("- `shinny-log` / `shinny-netlog` — 打开流日志 / 网络日志")
 	add("- `shinny-preview` — 把当前 Markdown 或最后一条回答渲染到新 tab")
 	add("- `shinny-chat-stop` — 停止正在生成的回复")
 	add("- `shinny-image [path]` — 附加图片到下一问（不带参数读剪贴板）")
@@ -3284,13 +3373,19 @@ function shinny_log(bp, args)
 	if bp == nil then
 		return
 	end
-	local path = LAST_LOG_PATH or (log_dir() .. "/last-stream.log")
+	local which = trim(join_args(args))
+	local path
+	if which == "net" then
+		path = LAST_NET_PATH or (log_dir() .. "/last-network.log")
+	else
+		path = LAST_LOG_PATH or (log_dir() .. "/last-stream.log")
+	end
 	local text = read_text_file(path)
 	if text == nil then
 		micro.InfoBar():Error("shinny: 还没有日志文件 " .. path)
 		return
 	end
-	local name = "shinny log"
+	local name = which == "net" and "shinny net log" or "shinny log"
 	local buf = nil
 	local ok = pcall(function()
 		bp:AddTab()
@@ -3331,6 +3426,10 @@ function shinny_log(bp, args)
 		buf:SetOption("readonly", true)
 	end)
 	micro.InfoBar():Message("shinny: log " .. path)
+end
+
+function shinny_netlog(bp, args)
+	shinny_log(bp, { "net" })
 end
 
 function shinny_chat(bp, args)
@@ -3411,6 +3510,7 @@ function init()
 	config.MakeCommand("shinny-chat-newline", shinny_chat_newline, config.NoComplete)
 	config.MakeCommand("shinny-preview", shinny_preview, config.NoComplete)
 	config.MakeCommand("shinny-log", shinny_log, config.NoComplete)
+	config.MakeCommand("shinny-netlog", shinny_netlog, config.NoComplete)
 	config.MakeCommand("shinny-model", shinny_model, config.NoComplete)
 	config.MakeCommand("shinny-thinking", shinny_thinking, config.NoComplete)
 	config.MakeCommand("shinny-effort", shinny_effort, config.NoComplete)
