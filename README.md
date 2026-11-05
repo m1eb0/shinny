@@ -65,6 +65,12 @@ for each hit, plus a header with the result count and response time.
 
 Inside micro: `> help shinny` has the same reference.
 
+## Troubleshooting
+
+Errors are reported in the info bar. `> shinny-raw` opens the last raw
+response, which makes it easy to tell an API error from a proxy/network page
+that looks like a 200.
+
 ## How it works
 
 `shinny.lua` grabs `bp.Cursor:GetSelection()`, builds a Tavily request, and

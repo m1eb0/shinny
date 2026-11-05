@@ -1,4 +1,4 @@
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 -- shinny: search the web with Tavily for the selected text and show the
 -- results in a split. Run `> help shinny` inside micro for the fine print.
@@ -16,6 +16,10 @@ local DEFAULT_DEPTH = "basic"
 local MAX_QUERY_BYTES = 380
 local MAX_SNIPPET_BYTES = 480
 local STATUS_MARKER = "__SHINNY_STATUS__"
+
+-- Kept so `> shinny-raw` can show whatever came back the last time.
+local last_response = nil
+local last_query = ""
 
 -- The query, the key and the endpoint travel through the environment so that
 -- the shell never has to quote user text.
@@ -140,10 +144,30 @@ local function utf8_char(code)
 	)
 end
 
+-- join_pieces concatenates in small batches: gopher-lua's table.concat
+-- overflows its registry when given thousands of elements at once.
+local function join_pieces(pieces)
+	if #pieces <= 128 then
+		return table.concat(pieces)
+	end
+	local chunks = {}
+	for i = 1, #pieces, 128 do
+		local part = {}
+		for j = i, math.min(i + 127, #pieces) do
+			part[#part + 1] = pieces[j]
+		end
+		chunks[#chunks + 1] = table.concat(part)
+	end
+	return table.concat(chunks)
+end
+
 -- json_decode is a small JSON reader so the plugin does not depend on a
 -- json library. It is only ever used on Tavily's response.
 local function json_decode(input)
 	local s = tostr(input)
+	if s:sub(1, 3) == "\239\187\191" then
+		s = s:sub(4)
+	end
 	local pos = 1
 	local len = #s
 
@@ -166,13 +190,19 @@ local function json_decode(input)
 		pos = pos + 1 -- opening quote
 		local pieces = {}
 		while true do
-			if pos > len then
-				fail("unterminated string")
+			-- copy the whole run between quotes and escapes in one go; a
+			-- per-character loop makes table.concat explode on long strings
+			local run = s:match('^[^"\\]+', pos)
+			if run then
+				pieces[#pieces + 1] = run
+				pos = pos + #run
 			end
 			local c = s:sub(pos, pos)
-			if c == '"' then
+			if c == "" then
+				fail("unterminated string")
+			elseif c == '"' then
 				pos = pos + 1
-				return table.concat(pieces)
+				return join_pieces(pieces)
 			elseif c == "\\" then
 				local esc = s:sub(pos + 1, pos + 1)
 				pos = pos + 2
@@ -514,8 +544,14 @@ end
 
 local function finish(query, opts, output)
 	local status, payload = split_output(output)
+	last_query = query
+	last_response = payload
 	if status == nil then
-		micro.InfoBar():Error("shinny: could not run curl — " .. shorten(collapse(payload), 140))
+		if trim(payload) == "" then
+			micro.InfoBar():Error("shinny: curl produced no output — is curl installed?")
+		else
+			micro.InfoBar():Error("shinny: could not run curl — " .. shorten(collapse(payload), 140))
+		end
 		return
 	end
 	if status == 0 then
@@ -530,9 +566,17 @@ local function finish(query, opts, output)
 		micro.InfoBar():Error("shinny: " .. shorten(detail, 160))
 		return
 	end
+	if trim(payload) == "" then
+		micro.InfoBar():Error(string.format("shinny: empty response from Tavily (HTTP %d) — > shinny-raw", status))
+		return
+	end
 	local ok, data = pcall(json_decode, payload)
-	if not ok or type(data) ~= "table" then
-		micro.InfoBar():Error("shinny: unexpected response from Tavily")
+	if not ok then
+		micro.InfoBar():Error("shinny: bad JSON — " .. shorten(collapse(data), 70) .. " — > shinny-raw")
+		return
+	end
+	if type(data) ~= "table" then
+		micro.InfoBar():Error("shinny: unexpected response (" .. type(data) .. ") — > shinny-raw")
 		return
 	end
 	if data.error ~= nil then
@@ -603,6 +647,23 @@ function shinny(bp, args)
 	start_search(query)
 end
 
+-- shinny-raw reopens the last raw response; useful when Tavily (or a proxy)
+-- returns something the plugin cannot parse.
+function shinny_raw(bp)
+	if last_response == nil then
+		micro.InfoBar():Error("shinny: no response yet")
+		return
+	end
+	local pane = micro.CurPane()
+	if pane == nil then
+		micro.InfoBar():Error("shinny: no pane to show the response in")
+		return
+	end
+	local buf = buffer.NewBuffer(last_response, "")
+	buf:SetName("shinny raw: " .. shorten(last_query, 32))
+	pane:VSplitBuf(buf)
+end
+
 function init()
 	config.RegisterGlobalOption("shinny", "apikey", "")
 	config.RegisterGlobalOption("shinny", "maxresults", 5)
@@ -611,5 +672,6 @@ function init()
 	config.RegisterGlobalOption("shinny", "endpoint", DEFAULT_ENDPOINT)
 
 	config.MakeCommand("shinny", shinny, config.NoComplete)
+	config.MakeCommand("shinny-raw", shinny_raw, config.NoComplete)
 	config.AddRuntimeFile("shinny", config.RTHelp, "help/shinny.md")
 end

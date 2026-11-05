@@ -41,6 +41,12 @@ Bind the command in `bindings.json` (`> help keybindings`):
 * `shinny.endpoint`: search endpoint. Default:
   `https://api.tavily.com/search`.
 
+## Troubleshooting
+
+If a search fails, the info bar shows why. `> shinny-raw` opens the last raw
+response in a split — useful when Tavily (or a proxy) returns HTML or an
+unexpected payload.
+
 ## Notes
 
 * The query, key and endpoint are passed to `curl` through environment

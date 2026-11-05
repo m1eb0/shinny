@@ -363,7 +363,7 @@ test("rejects a malformed response", function()
 	run_shinny(state.pane, nil)
 
 	assert_true(not state.split, "should not open a split")
-	assert_contains(last_message(), "unexpected response")
+	assert_contains(last_message(), "bad JSON")
 end)
 
 test("escapes quotes and control characters in the query body", function()
@@ -415,6 +415,69 @@ test("includes the answer only when enabled", function()
 	assert_contains(state.job_env.BODY, '"include_answer":false')
 	assert_true(not state.buffer_text:find("Coroutines let a function pause", 1, true), "answer rendered while disabled")
 	state.options["shinny.includeanswer"] = true
+end)
+
+test("decodes long strings and escape-heavy strings", function()
+	reset()
+	state.options["shinny.apikey"] = "tvly-test"
+	state.selection = "x"
+	local long = string.rep("长文本内容 ", 1500)
+	local escaped = string.rep('a\\nb\\tc\\"d\\\\e ', 600)
+	state.output = '{"answer":"' .. escaped .. '","results":[{"title":"long","url":"https://example.test/long","content":"'
+		.. long .. '"}]}\n__SHINNY_STATUS__:200'
+	state.pane = new_bp()
+
+	run_shinny(state.pane, nil)
+
+	assert_true(state.split, "expected a split: " .. last_message())
+	assert_contains(state.buffer_text, "long")
+	assert_contains(state.buffer_text, "https://example.test/long")
+	assert_contains(state.buffer_text, "长文本内容")
+	assert_contains(state.buffer_text, 'c"d\\e')
+end)
+
+test("strips a UTF-8 BOM before parsing", function()
+	reset()
+	state.options["shinny.apikey"] = "tvly-test"
+	state.selection = "x"
+	state.output = "\239\187\191" .. SAMPLE
+	state.pane = new_bp()
+
+	run_shinny(state.pane, nil)
+
+	assert_true(state.split, "expected a split: " .. last_message())
+	assert_contains(state.buffer_text, "Lua 5.4 Reference Manual")
+end)
+
+test("reports an empty 200 response", function()
+	reset()
+	state.options["shinny.apikey"] = "tvly-test"
+	state.selection = "x"
+	state.output = "\n__SHINNY_STATUS__:200"
+	state.pane = new_bp()
+
+	run_shinny(state.pane, nil)
+
+	assert_true(not state.split, "should not open a split")
+	assert_contains(last_message(), "empty response")
+end)
+
+test("keeps the raw response for shinny-raw", function()
+	reset()
+	state.options["shinny.apikey"] = "tvly-test"
+	state.selection = "x"
+	state.output = "<html>proxy error</html>\n__SHINNY_STATUS__:200"
+	state.pane = new_bp()
+
+	run_shinny(state.pane, nil)
+
+	assert_true(not state.split, "should not open a split")
+	assert_contains(last_message(), "bad JSON")
+	assert_contains(last_message(), "shinny-raw")
+
+	state.commands["shinny-raw"](state.pane, nil)
+	assert_true(state.split, "shinny-raw should open a split")
+	assert_contains(state.buffer_text, "<html>proxy error</html>")
 end)
 
 if integration_url then
