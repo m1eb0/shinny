@@ -1,7 +1,8 @@
-VERSION = "0.1.1"
+VERSION = "0.2.0"
 
--- shinny: search the web with Tavily for the selected text and show the
--- results in a split. Run `> help shinny` inside micro for the fine print.
+-- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
+-- LLM chat that can edit the buffer you are working in.
+-- Run `> help shinny` inside micro for the fine print.
 
 local micro = import("micro")
 local config = import("micro/config")
@@ -10,24 +11,38 @@ local shell = import("micro/shell")
 local util = import("micro/util")
 local os = import("os")
 local strings = import("strings")
+local ioutil = import("io/ioutil")
+local fmt = import("fmt")
 
 local DEFAULT_ENDPOINT = "https://api.tavily.com/search"
+local DEFAULT_DS_SEARCH = "https://api.deepseek.com/v1/tools/search"
+local DEFAULT_DS_CHAT = "https://api.deepseek.com/chat/completions"
 local DEFAULT_DEPTH = "basic"
+local DEFAULT_PREFIX = "什么是"
 local MAX_QUERY_BYTES = 380
+local MAX_DS_QUERY_CHARS = 128
 local MAX_SNIPPET_BYTES = 480
 local STATUS_MARKER = "__SHINNY_STATUS__"
+local CHAT_PREFIX = "shinny chat · "
+local STATE_PATH = config.ConfigDir .. "/shinny.json"
 
--- Kept so `> shinny-raw` can show whatever came back the last time.
+-- `shinny-prefix`, `shinny-suffix` and `shinny-backend` persist here.
+local runtime = {
+	prefix = DEFAULT_PREFIX,
+	suffix = "",
+	backend = "tavily",
+	loaded = false,
+}
+
+-- The raw body of the last request, for `> shinny-raw`.
 local last_response = nil
 local last_query = ""
+-- Rendered results of the last search, shown to the chat as context.
+local last_search_text = ""
+local last_search_query = ""
 
--- The query, the key and the endpoint travel through the environment so that
--- the shell never has to quote user text.
-local CURL_CMD = 'curl -sS --max-time 45 -X POST "$SHINNY_ENDPOINT"'
-	.. ' -H "Content-Type: application/json"'
-	.. ' -H "Authorization: Bearer $SHINNY_KEY"'
-	.. ' --data-binary "$SHINNY_BODY"'
-	.. ' -w "\\n' .. STATUS_MARKER .. ':%{http_code}"'
+-- Per-file chat state, keyed by the chat buffer name.
+local chats = {}
 
 local function tostr(v)
 	if v == nil then
@@ -101,6 +116,22 @@ local function shorten(s, limit)
 	return clamp(s, limit) .. "…"
 end
 
+-- utf8_sub keeps at most maxchars characters (not bytes).
+local function utf8_sub(s, maxchars)
+	s = tostr(s)
+	local n = 0
+	for i = 1, #s do
+		local b = s:byte(i)
+		if b < 0x80 or b >= 0xC0 then
+			n = n + 1
+			if n > maxchars then
+				return utf8_prefix(s, i - 1)
+			end
+		end
+	end
+	return s
+end
+
 local JSON_ESCAPES = {
 	['"'] = '\\"',
 	["\\"] = "\\\\",
@@ -162,7 +193,7 @@ local function join_pieces(pieces)
 end
 
 -- json_decode is a small JSON reader so the plugin does not depend on a
--- json library. It is only ever used on Tavily's response.
+-- json library. It is only used on API responses and the state file.
 local function json_decode(input)
 	local s = tostr(input)
 	if s:sub(1, 3) == "\239\187\191" then
@@ -190,8 +221,6 @@ local function json_decode(input)
 		pos = pos + 1 -- opening quote
 		local pieces = {}
 		while true do
-			-- copy the whole run between quotes and escapes in one go; a
-			-- per-character loop makes table.concat explode on long strings
 			local run = s:match('^[^"\\]+', pos)
 			if run then
 				pieces[#pieces + 1] = run
@@ -375,12 +404,127 @@ local function option_bool(name, default)
 	return s == "true" or s == "on" or s == "1" or s == "yes"
 end
 
-local function api_key()
-	local env = os.Getenv("TAVILY_API_KEY")
-	if env ~= nil and trim(env) ~= "" then
-		return trim(env)
+local function current_prefix()
+	return tostr(option("prefix", DEFAULT_PREFIX))
+end
+
+local function current_suffix()
+	return tostr(option("suffix", ""))
+end
+
+local function current_backend()
+	local b = trim(tostr(option("backend", "tavily")))
+	if b ~= "deepseek" then
+		return "tavily"
 	end
-	return trim(tostr(option("apikey", "")))
+	return "deepseek"
+end
+
+-- ---------------------------------------------------------------------------
+-- state file
+-- ---------------------------------------------------------------------------
+
+local function load_state()
+	local ok, data = pcall(ioutil.ReadFile, STATE_PATH)
+	if not ok or data == nil then
+		return
+	end
+	local ok2, text = pcall(function()
+		return fmt.Sprintf("%s", data)
+	end)
+	if not ok2 or trim(text) == "" then
+		return
+	end
+	local ok3, obj = pcall(json_decode, text)
+	if not ok3 or type(obj) ~= "table" then
+		return
+	end
+	if type(obj.prefix) == "string" then
+		runtime.prefix = obj.prefix
+	end
+	if type(obj.suffix) == "string" then
+		runtime.suffix = obj.suffix
+	end
+	if type(obj.backend) == "string" and obj.backend ~= "" then
+		runtime.backend = obj.backend
+	end
+	runtime.loaded = true
+end
+
+local function save_state()
+	local text = string.format(
+		'{\n    "prefix": "%s",\n    "suffix": "%s",\n    "backend": "%s"\n}\n',
+		json_escape(runtime.prefix),
+		json_escape(runtime.suffix),
+		json_escape(runtime.backend)
+	)
+	local ok, err = pcall(ioutil.WriteFile, STATE_PATH, text, 384)
+	if not ok then
+		micro.InfoBar():Error("shinny: 无法保存 " .. STATE_PATH .. " — " .. tostr(err))
+	end
+end
+
+local function apply_state()
+	if not runtime.loaded then
+		return
+	end
+	pcall(config.SetGlobalOption, "shinny.prefix", runtime.prefix)
+	pcall(config.SetGlobalOption, "shinny.suffix", runtime.suffix)
+	pcall(config.SetGlobalOption, "shinny.backend", runtime.backend)
+end
+
+local function set_setting(name, value)
+	runtime[name] = value
+	save_state()
+	pcall(config.SetGlobalOption, "shinny." .. name, tostr(value))
+end
+
+-- ---------------------------------------------------------------------------
+-- small helpers over micro objects
+-- ---------------------------------------------------------------------------
+
+local function curl_cmd(timeout)
+	return 'curl -sS --max-time ' .. tostring(timeout) .. ' -X POST "$SHINNY_ENDPOINT"'
+		.. ' -H "Content-Type: application/json"'
+		.. ' -H "Authorization: Bearer $SHINNY_KEY"'
+		.. ' --data-binary "$SHINNY_BODY"'
+		.. ' -w "\\n' .. STATUS_MARKER .. ':%{http_code}"'
+end
+
+local function split_output(output)
+	output = tostr(output)
+	local idx = output:find(STATUS_MARKER, 1, true)
+	if not idx then
+		return nil, trim(output)
+	end
+	local payload = trim(output:sub(1, idx - 1))
+	local code = output:match(STATUS_MARKER .. ":(%d+)")
+	if code == nil then
+		return nil, payload
+	end
+	return tonumber(code), payload
+end
+
+local function error_detail(payload)
+	local ok, data = pcall(json_decode, payload)
+	if ok and type(data) == "table" then
+		local detail = data.detail
+		if type(detail) == "table" and detail.error ~= nil then
+			return collapse(detail.error)
+		elseif type(detail) == "string" then
+			return collapse(detail)
+		end
+		if data.error ~= nil then
+			if type(data.error) == "table" and data.error.message ~= nil then
+				return collapse(data.error.message)
+			end
+			return collapse(data.error)
+		end
+		if data.message ~= nil then
+			return collapse(data.message)
+		end
+	end
+	return ""
 end
 
 local function selected_text(bp)
@@ -414,14 +558,113 @@ local function join_args(args)
 	return table.concat(parts, " ")
 end
 
-local function request_body(query, opts)
-	return string.format(
-		'{"query":"%s","max_results":%.0f,"include_answer":%s,"search_depth":"%s"}',
-		json_escape(query),
-		opts.max_results,
-		opts.include_answer and "true" or "false",
-		json_escape(opts.depth)
-	)
+local function is_chat_name(name)
+	name = tostr(name)
+	return name:sub(1, #CHAT_PREFIX) == CHAT_PREFIX
+end
+
+local function is_shinny_buffer(name)
+	name = tostr(name)
+	return name:sub(1, 6) == "shinny"
+end
+
+local function buffer_text(buf)
+	local ok, n = pcall(function()
+		return buf:LinesNum()
+	end)
+	if ok and type(n) == "number" and n > 0 then
+		local lines = {}
+		for i = 0, n - 1 do
+			lines[#lines + 1] = buf:Line(i)
+		end
+		return table.concat(lines, "\n")
+	end
+	local lines = {}
+	for i = 0, 5000 do
+		local ok2, line = pcall(function()
+			return buf:Line(i)
+		end)
+		if not ok2 then
+			break
+		end
+		lines[#lines + 1] = line
+	end
+	return table.concat(lines, "\n")
+end
+
+local function open_buffers()
+	local list = {}
+	local seen = {}
+	pcall(function()
+		local tabs = micro.Tabs()
+		for i = 1, #tabs.List do
+			local tab = tabs.List[i]
+			for j = 1, #tab.Panes do
+				local pane = tab.Panes[j]
+				local okb, b = pcall(function()
+					return pane.Buf
+				end)
+				if okb and b ~= nil then
+					local okn, name = pcall(function()
+						return b:GetName()
+					end)
+					if okn and name and not seen[name] and not is_shinny_buffer(name) then
+						seen[name] = true
+						list[#list + 1] = b
+					end
+				end
+			end
+		end
+	end)
+	return list
+end
+
+local function find_pane_by_name(name)
+	name = tostr(name)
+	local found = nil
+	pcall(function()
+		local tabs = micro.Tabs()
+		for i = 1, #tabs.List do
+			local tab = tabs.List[i]
+			for j = 1, #tab.Panes do
+				local pane = tab.Panes[j]
+				local okb, b = pcall(function()
+					return pane.Buf
+				end)
+				if okb and b ~= nil then
+					local okn, n = pcall(function()
+						return b:GetName()
+					end)
+					if okn and n == name then
+						found = pane
+						tabs:SetActive(i - 1)
+						tab:SetActive(j - 1)
+						return
+					end
+				end
+			end
+		end
+	end)
+	return found
+end
+
+-- ---------------------------------------------------------------------------
+-- search
+-- ---------------------------------------------------------------------------
+
+local function api_key(backend_name)
+	if backend_name == "deepseek" then
+		local env = trim(os.Getenv("DEEPSEEK_API_KEY"))
+		if env ~= "" then
+			return env
+		end
+		return trim(tostr(option("deepseekkey", "")))
+	end
+	local env = trim(os.Getenv("TAVILY_API_KEY"))
+	if env ~= "" then
+		return env
+	end
+	return trim(tostr(option("apikey", "")))
 end
 
 local function search_options()
@@ -442,59 +685,108 @@ local function search_options()
 	}
 end
 
-local function split_output(output)
-	output = tostr(output)
-	local idx = output:find(STATUS_MARKER, 1, true)
-	if not idx then
-		return nil, trim(output)
+local function build_search(ctx)
+	local opts = search_options()
+	if ctx.backend == "deepseek" then
+		local count = math.floor(option_number("maxresults", 5))
+		if count < 1 then
+			count = 1
+		elseif count > 50 then
+			count = 50
+		end
+		local q = utf8_sub(ctx.full, MAX_DS_QUERY_CHARS)
+		ctx.count = count
+		ctx.query = q
+		ctx.endpoint = trim(tostr(option("deepseektoolsurl", DEFAULT_DS_SEARCH)))
+		if ctx.endpoint == "" then
+			ctx.endpoint = DEFAULT_DS_SEARCH
+		end
+		ctx.body = string.format(
+			'{"query":"%s","count":%d,"need_content":false}',
+			json_escape(q),
+			count
+		)
+		return true
 	end
-	local payload = trim(output:sub(1, idx - 1))
-	local code = output:match(STATUS_MARKER .. ":(%d+)")
-	if code == nil then
-		return nil, payload
+	ctx.query = clamp(ctx.full, MAX_QUERY_BYTES)
+	ctx.endpoint = trim(tostr(option("endpoint", DEFAULT_ENDPOINT)))
+	if ctx.endpoint == "" then
+		ctx.endpoint = DEFAULT_ENDPOINT
 	end
-	return tonumber(code), payload
+	ctx.body = string.format(
+		'{"query":"%s","max_results":%.0f,"include_answer":%s,"search_depth":"%s"}',
+		json_escape(ctx.query),
+		opts.max_results,
+		opts.include_answer and "true" or "false",
+		json_escape(opts.depth)
+	)
+	ctx.opts = opts
+	return true
 end
 
-local function error_detail(payload)
-	local ok, data = pcall(json_decode, payload)
-	if ok and type(data) == "table" then
-		local detail = data.detail
-		if type(detail) == "table" and detail.error ~= nil then
-			return collapse(detail.error)
-		elseif type(detail) == "string" then
-			return collapse(detail)
-		end
-		if data.error ~= nil then
-			return collapse(data.error)
-		end
-		if data.message ~= nil then
-			return collapse(data.message)
+local function extract_results(backend_name, data)
+	local out = {}
+	local list = data.results
+	if type(list) ~= "table" then
+		return out
+	end
+	for _, r in ipairs(list) do
+		if type(r) == "table" then
+			local item = {
+				title = collapse(r.title),
+				url = trim(r.url),
+				score = nil,
+				site = nil,
+			}
+			if backend_name == "deepseek" then
+				local snippet = trim(r.snippet)
+				if snippet == "" then
+					snippet = trim(r.summary)
+				end
+				item.snippet = collapse(snippet)
+				if type(r.rerank_score) == "number" then
+					item.score = r.rerank_score
+				end
+				if type(r.site_name) == "string" then
+					item.site = r.site_name
+				end
+			else
+				item.snippet = collapse(r.content)
+				if type(r.score) == "number" then
+					item.score = r.score
+				end
+			end
+			out[#out + 1] = item
 		end
 	end
-	return ""
+	return out
 end
 
-local function render(query, data, opts)
+local function render_search(ctx, data)
 	local out = {}
 	local function add(line)
 		out[#out + 1] = line
 	end
 
-	local results = data.results
-	if type(results) ~= "table" then
-		results = {}
+	local results = extract_results(ctx.backend, data)
+	local meta = string.format("%s · %d result(s)", ctx.backend, #results)
+	if ctx.backend == "tavily" then
+		meta = meta .. " · " .. ctx.opts.depth
 	end
-
-	add("shinny · " .. collapse(query))
-	local meta = string.format("%d result(s) · %s", #results, opts.depth)
 	if type(data.response_time) == "number" then
 		meta = meta .. string.format(" · %.2fs", data.response_time)
 	end
+
+	add("shinny · " .. collapse(ctx.full))
 	add(meta)
+	add(string.format(
+		"前缀「%s」 · 后缀「%s」",
+		ctx.prefix == "" and "无" or ctx.prefix,
+		ctx.suffix == "" and "无" or ctx.suffix
+	))
 	add("")
 
-	if opts.include_answer and type(data.answer) == "string" and trim(data.answer) ~= "" then
+	if ctx.backend == "tavily" and ctx.opts.include_answer and type(data.answer) == "string" and trim(data.answer) ~= "" then
 		add("Answer")
 		add(collapse(data.answer))
 		add("")
@@ -505,25 +797,19 @@ local function render(query, data, opts)
 		return table.concat(out, "\n")
 	end
 
-	for i, result in ipairs(results) do
-		if type(result) ~= "table" then
-			result = {}
+	for i, r in ipairs(results) do
+		add(string.format("%d. %s", i, r.title ~= "" and r.title or "(untitled)"))
+		if r.url ~= "" then
+			add("   " .. r.url)
 		end
-		local title = collapse(result.title)
-		if title == "" then
-			title = "(untitled)"
+		if r.snippet ~= "" then
+			add("   " .. shorten(r.snippet, MAX_SNIPPET_BYTES))
 		end
-		add(string.format("%d. %s", i, title))
-		local url = trim(result.url)
-		if url ~= "" then
-			add("   " .. url)
+		if r.site ~= nil and r.site ~= "" then
+			add("   site: " .. r.site)
 		end
-		local content = collapse(result.content)
-		if content ~= "" then
-			add("   " .. shorten(content, MAX_SNIPPET_BYTES))
-		end
-		if type(result.score) == "number" then
-			add(string.format("   score: %.3f", result.score))
+		if type(r.score) == "number" then
+			add(string.format("   score: %.3f", r.score))
 		end
 		add("")
 	end
@@ -531,21 +817,22 @@ local function render(query, data, opts)
 	return table.concat(out, "\n")
 end
 
-local function show_results(query, data, opts)
+local function show_results(ctx, text)
 	local bp = micro.CurPane()
 	if bp == nil then
 		micro.InfoBar():Error("shinny: no pane to show the results in")
 		return
 	end
-	local buf = buffer.NewBuffer(render(query, data, opts), "")
-	buf:SetName("shinny: " .. shorten(query, 40))
+	local buf = buffer.NewBuffer(text, "")
+	buf:SetName("shinny: " .. shorten(ctx.full, 40))
 	bp:VSplitBuf(buf)
 end
 
-local function finish(query, opts, output)
+local function finish_search(ctx, output)
 	local status, payload = split_output(output)
-	last_query = query
+	last_query = ctx.full
 	last_response = payload
+
 	if status == nil then
 		if trim(payload) == "" then
 			micro.InfoBar():Error("shinny: curl produced no output — is curl installed?")
@@ -555,7 +842,7 @@ local function finish(query, opts, output)
 		return
 	end
 	if status == 0 then
-		micro.InfoBar():Error("shinny: could not reach Tavily — check your network")
+		micro.InfoBar():Error("shinny: could not reach " .. ctx.backend .. " — check your network")
 		return
 	end
 	if status < 200 or status >= 300 then
@@ -567,7 +854,7 @@ local function finish(query, opts, output)
 		return
 	end
 	if trim(payload) == "" then
-		micro.InfoBar():Error(string.format("shinny: empty response from Tavily (HTTP %d) — > shinny-raw", status))
+		micro.InfoBar():Error(string.format("shinny: empty response (%s, HTTP %d) — > shinny-raw", ctx.backend, status))
 		return
 	end
 	local ok, data = pcall(json_decode, payload)
@@ -579,45 +866,52 @@ local function finish(query, opts, output)
 		micro.InfoBar():Error("shinny: unexpected response (" .. type(data) .. ") — > shinny-raw")
 		return
 	end
-	if data.error ~= nil then
+	if data.error ~= nil and ctx.backend == "tavily" then
 		micro.InfoBar():Error("shinny: " .. shorten(collapse(data.error), 160))
 		return
 	end
-	show_results(query, data, opts)
+
+	local text = render_search(ctx, data)
+	last_search_text = text
+	last_search_query = ctx.full
+	show_results(ctx, text)
+
 	local count = 0
 	if type(data.results) == "table" then
 		count = #data.results
 	end
-	micro.InfoBar():Message(string.format("shinny: %d result(s)", count))
+	micro.InfoBar():Message(string.format("shinny: %s · %d result(s)", ctx.backend, count))
 end
 
-local function start_search(query)
-	local key = api_key()
+local function start_search(base)
+	local backend_name = current_backend()
+	local key = api_key(backend_name)
 	if key == "" then
-		micro.InfoBar():Error("shinny: no Tavily API key — run > set shinny.apikey <key>")
+		if backend_name == "deepseek" then
+			micro.InfoBar():Error("shinny: 没有 DeepSeek key — 运行 > set shinny.deepseekkey <key>")
+		else
+			micro.InfoBar():Error("shinny: 没有 Tavily key — 运行 > set shinny.apikey <key>")
+		end
 		return
 	end
 
-	query = clamp(query, MAX_QUERY_BYTES)
-	if query == "" then
-		micro.InfoBar():Error("shinny: nothing to search for")
-		return
-	end
+	local ctx = {
+		base = base,
+		prefix = current_prefix(),
+		suffix = current_suffix(),
+		backend = backend_name,
+	}
+	ctx.full = ctx.prefix .. base .. ctx.suffix
+	build_search(ctx)
 
-	local opts = search_options()
-	local endpoint = trim(tostr(option("endpoint", DEFAULT_ENDPOINT)))
-	if endpoint == "" then
-		endpoint = DEFAULT_ENDPOINT
-	end
-
-	os.Setenv("SHINNY_ENDPOINT", endpoint)
+	os.Setenv("SHINNY_ENDPOINT", ctx.endpoint)
 	os.Setenv("SHINNY_KEY", key)
-	os.Setenv("SHINNY_BODY", request_body(query, opts))
+	os.Setenv("SHINNY_BODY", ctx.body)
 
-	local ok, err = pcall(shell.JobStart, CURL_CMD, nil, nil, function(output)
+	local ok, err = pcall(shell.JobStart, curl_cmd(45), nil, nil, function(output)
 		os.Setenv("SHINNY_KEY", "")
 		os.Setenv("SHINNY_BODY", "")
-		local ran, problem = pcall(finish, query, opts, output)
+		local ran, problem = pcall(finish_search, ctx, output)
 		if not ran then
 			micro.InfoBar():Error("shinny: internal error — " .. shorten(collapse(problem), 140))
 		end
@@ -630,33 +924,486 @@ local function start_search(query)
 		return
 	end
 
-	micro.InfoBar():Message("shinny: searching…")
+	micro.InfoBar():Message(string.format(
+		"shinny: %s「%s」 (前缀「%s」 后缀「%s」)",
+		ctx.backend,
+		shorten(ctx.full, 60),
+		ctx.prefix == "" and "无" or ctx.prefix,
+		ctx.suffix == "" and "无" or ctx.suffix
+	))
 end
 
--- shinny is the command: `> shinny` searches the selection, `> shinny foo bar`
--- searches the given words.
+-- ---------------------------------------------------------------------------
+-- chat context
+-- ---------------------------------------------------------------------------
+
+local function build_context(chat)
+	local parts = {}
+	local function add(line)
+		parts[#parts + 1] = line
+	end
+
+	add("你是运行在 micro 编辑器里的编程助手。用户正在编辑文件，你可以看到下面列出的上下文。")
+	add("回答用中文，简洁、直接。")
+
+	local src = chat.src_pane
+	local src_name = nil
+	if src ~= nil then
+		local ok = pcall(function()
+			src_name = src.Buf:GetName()
+		end)
+		if not ok then
+			src = nil
+			src_name = nil
+		end
+	end
+
+	if src_name then
+		add("")
+		add("当前文件: " .. src_name)
+		add(string.format("光标位置: 第 %d 行, 第 %d 列", src.Cursor.Y + 1, src.Cursor.X + 1))
+		local okline, line = pcall(function()
+			return src.Buf:Line(src.Cursor.Y)
+		end)
+		if okline then
+			add("光标所在行: " .. line)
+		end
+		local selection = selected_text(src)
+		if selection ~= "" then
+			add("选中文本:")
+			add(utf8_prefix(selection, 3000))
+		else
+			add("选中文本: （无）")
+		end
+	end
+
+	if last_search_text ~= "" then
+		add("")
+		add("最近一次搜索结果（查询「" .. last_search_query .. "」）:")
+		add(utf8_prefix(last_search_text, 6000))
+	end
+
+	add("")
+	add("打开的文件:")
+	local budget = option_number("chatcontext", 24000)
+	local used = 0
+	local files = open_buffers()
+	for _, b in ipairs(files) do
+		if used >= budget then
+			break
+		end
+		local name = "?"
+		pcall(function()
+			name = b:GetName()
+		end)
+		local text = buffer_text(b)
+		local cap = budget - used
+		if name == src_name then
+			cap = math.min(cap, 12000)
+		else
+			cap = math.min(cap, 4000)
+		end
+		if #text > cap then
+			text = utf8_prefix(text, cap) .. "\n…（已截断）"
+		end
+		used = used + #text
+		add("")
+		add("### 文件: " .. name .. (name == src_name and "（当前文件）" or ""))
+		add(text)
+	end
+
+	add("")
+	add("修改文件的规则：")
+	add("当用户要求修改当前文件时，在回答里嵌入下面格式的块（可以有多个）：")
+	add("<<<SHINNY_EDIT selection>>>")
+	add("替换当前选区的新文本")
+	add("<<<SHINNY_EDIT_END>>>")
+	add("target 可以是 selection（替换选区）、cursor（插入到光标处）、line（替换光标所在行）。")
+	add("编辑块不要放在 markdown 代码围栏里；不需要修改文件时不要输出编辑块。")
+
+	return table.concat(parts, "\n")
+end
+
+-- ---------------------------------------------------------------------------
+-- chat edits
+-- ---------------------------------------------------------------------------
+
+local function valid_pane(pane)
+	if pane == nil then
+		return false
+	end
+	local ok = pcall(function()
+		local _ = pane.Buf:GetName()
+	end)
+	return ok
+end
+
+local function apply_edit(chat, target, text)
+	local pane = chat.src_pane
+	if not valid_pane(pane) then
+		return false, "原文件已关闭，无法修改"
+	end
+	local buf = pane.Buf
+	local ok, result = pcall(function()
+		local cur = buf:GetActiveCursor()
+		if target == "selection" then
+			local had = cur:HasSelection()
+			if had then
+				cur:DeleteSelection()
+				cur:ResetSelection()
+			end
+			buf:Insert(buffer.Loc(cur.X, cur.Y), text)
+			if had then
+				return "已替换选区"
+			end
+			return "没有选区，已插入到光标处"
+		elseif target == "cursor" then
+			buf:Insert(buffer.Loc(cur.X, cur.Y), text)
+			return "已在光标处插入"
+		elseif target == "line" then
+			local y = cur.Y
+			local line = buf:Line(y)
+			buf:Remove(buffer.Loc(0, y), buffer.Loc(#line, y))
+			buf:Insert(buffer.Loc(0, y), text)
+			return string.format("已替换第 %d 行", y + 1)
+		end
+		error("unknown target: " .. tostr(target), 0)
+	end)
+	if not ok then
+		return false, tostr(result)
+	end
+	return true, tostr(result)
+end
+
+-- apply_edits strips edit blocks out of the model response and applies them.
+local function apply_edits(chat, response)
+	response = tostr(response):gsub("\r\n", "\n")
+	local notes = {}
+
+	local function handle(target, text)
+		text = text:gsub("^\n", "")
+		local ok, note = apply_edit(chat, target, text)
+		if ok then
+			notes[#notes + 1] = note
+		else
+			notes[#notes + 1] = "修改失败（" .. target .. "）：" .. note
+		end
+		return ""
+	end
+
+	local cleaned = response:gsub(
+		"<<<SHINNY_EDIT%s*([%a_]+)%s*>>>\n?(.-)\n?<<<SHINNY_EDIT_END>>>",
+		handle
+	)
+	cleaned = cleaned:gsub("<<<SHINNY_EDIT.-SHINNY_EDIT_END>>>", "")
+
+	return trim(cleaned), notes
+end
+
+-- ---------------------------------------------------------------------------
+-- chat
+-- ---------------------------------------------------------------------------
+
+local function chat_label(name)
+	name = tostr(name)
+	if name == "" or name == "No name" then
+		return "untitled"
+	end
+	return name:match("([^/\\]+)$") or name
+end
+
+local function render_chat(chat)
+	local out = {}
+	local function add(line)
+		out[#out + 1] = line
+	end
+
+	add("shinny chat · " .. chat.label)
+	add("Alt-i 提问 · 回答里的修改会直接应用到该文件（Ctrl-Z 可撤销）")
+	add("")
+
+	if #chat.messages == 0 then
+		add("（还没有对话。按 Alt-i 输入问题，例如：）")
+		add("  解释光标处的代码")
+		add("  把选区改写成更专业的语言")
+		add("  把这行改成英文")
+		add("")
+	end
+
+	for _, m in ipairs(chat.messages) do
+		add(m.role == "user" and "you:" or "assistant:")
+		add(m.content)
+		add("")
+	end
+
+	return table.concat(out, "\n")
+end
+
+local function text_end_loc(text)
+	text = tostr(text)
+	if text == "" then
+		return buffer.Loc(0, 0)
+	end
+	local y, last = 0, 0
+	for p in text:gmatch("\n()") do
+		y = y + 1
+		last = p
+	end
+	return buffer.Loc(#text - last, y)
+end
+
+local function set_chat_text(chat, text)
+	local buf = chat.buf
+	if buf == nil then
+		return
+	end
+	local old = chat.text or ""
+	if #old > 0 then
+		pcall(function()
+			buf:Remove(buffer.Loc(0, 0), text_end_loc(old))
+		end)
+	end
+	buf:Insert(buffer.Loc(0, 0), text)
+	chat.text = text
+
+	local loc = text_end_loc(text)
+	pcall(function()
+		buf:GetActiveCursor():GotoLoc(loc)
+	end)
+	if chat.pane ~= nil then
+		pcall(function()
+			chat.pane:GotoLoc(loc)
+		end)
+	end
+end
+
+local function chat_key()
+	local env = trim(os.Getenv("DEEPSEEK_API_KEY"))
+	if env ~= "" then
+		return env
+	end
+	return trim(tostr(option("deepseekkey", "")))
+end
+
+local function chat_body(chat, context)
+	local model = trim(tostr(option("chatmodel", "deepseek-chat")))
+	if model == "" then
+		model = "deepseek-chat"
+	end
+	local msgs = {}
+	local function add(role, content)
+		msgs[#msgs + 1] = string.format('{"role":"%s","content":"%s"}', role, json_escape(content))
+	end
+	add("system", context)
+	local start = math.max(1, #chat.messages - 12)
+	for i = start, #chat.messages do
+		add(chat.messages[i].role, chat.messages[i].content)
+	end
+	return string.format(
+		'{"model":"%s","messages":[%s],"temperature":0.3,"stream":false}',
+		json_escape(model),
+		table.concat(msgs, ",")
+	)
+end
+
+local function append_message(chat, role, content)
+	chat.messages[#chat.messages + 1] = { role = role, content = tostr(content) }
+	set_chat_text(chat, render_chat(chat))
+end
+
+local function finish_chat(chat, output)
+	local status, payload = split_output(output)
+	if status == nil then
+		append_message(chat, "assistant", "（请求没有返回：curl 没有输出）")
+		return
+	end
+	if status < 200 or status >= 300 then
+		local detail = error_detail(payload)
+		if detail == "" then
+			detail = "HTTP " .. tostr(status)
+		end
+		append_message(chat, "assistant", "（请求失败：" .. shorten(detail, 300) .. "）")
+		return
+	end
+	local ok, data = pcall(json_decode, payload)
+	if not ok or type(data) ~= "table" then
+		last_response = payload
+		append_message(chat, "assistant", "（响应不是 JSON，运行 > shinny-raw 查看）")
+		return
+	end
+	last_response = payload
+
+	local content = nil
+	local choices = data.choices
+	if type(choices) == "table" and choices[1] and type(choices[1]) == "table" then
+		local message = choices[1].message
+		if type(message) == "table" then
+			content = message.content
+		end
+	end
+	if type(content) ~= "string" or trim(content) == "" then
+		local detail = error_detail(payload)
+		if detail == "" then
+			detail = "没有拿到回复内容"
+		end
+		append_message(chat, "assistant", "（" .. shorten(detail, 300) .. "）")
+		return
+	end
+
+	local cleaned, notes = apply_edits(chat, content)
+	local shown = cleaned
+	if #notes > 0 then
+		shown = (shown ~= "" and shown .. "\n\n" or "") .. "[已应用到文件] " .. table.concat(notes, "；")
+	end
+	append_message(chat, "assistant", shown)
+	micro.InfoBar():Message("shinny: 回复完成")
+end
+
+local function send_chat(chat, question)
+	if chat.busy then
+		micro.InfoBar():Error("shinny: 上一个问题还在处理中")
+		return
+	end
+	local key = chat_key()
+	if key == "" then
+		micro.InfoBar():Error("shinny: 没有 DeepSeek key — 运行 > set shinny.deepseekkey <key>")
+		return
+	end
+
+	append_message(chat, "user", question)
+	chat.busy = true
+
+	local body = chat_body(chat, build_context(chat))
+	local url = trim(tostr(option("chaturl", DEFAULT_DS_CHAT)))
+	if url == "" then
+		url = DEFAULT_DS_CHAT
+	end
+
+	os.Setenv("SHINNY_ENDPOINT", url)
+	os.Setenv("SHINNY_KEY", key)
+	os.Setenv("SHINNY_BODY", body)
+	micro.InfoBar():Message("shinny: thinking…")
+
+	local ok, err = pcall(shell.JobStart, curl_cmd(120), nil, nil, function(output)
+		os.Setenv("SHINNY_KEY", "")
+		os.Setenv("SHINNY_BODY", "")
+		chat.busy = false
+		local ran, problem = pcall(finish_chat, chat, output)
+		if not ran then
+			append_message(chat, "assistant", "（内部错误：" .. shorten(collapse(problem), 300) .. "）")
+		end
+	end)
+
+	if not ok then
+		chat.busy = false
+		os.Setenv("SHINNY_KEY", "")
+		os.Setenv("SHINNY_BODY", "")
+		append_message(chat, "assistant", "（无法启动请求：" .. shorten(collapse(err), 300) .. "）")
+		return
+	end
+end
+
+local function ask_chat(chat)
+	micro.InfoBar():Prompt("ask> ", "", "shinny-chat", nil, function(resp, canceled)
+		if canceled then
+			return
+		end
+		local q = trim(tostr(resp))
+		if q == "" then
+			return
+		end
+		send_chat(chat, q)
+	end)
+end
+
+local function ensure_chat_pane(bp, chat)
+	local existing = find_pane_by_name(chat.name)
+	if existing ~= nil then
+		chat.pane = existing
+		return existing
+	end
+
+	local buf = chat.buf
+	if buf == nil then
+		buf = buffer.NewBuffer("", "")
+		buf:SetName(chat.name)
+		chat.buf = buf
+		chat.text = ""
+	end
+	set_chat_text(chat, render_chat(chat))
+
+	local pane = bp:VSplitBuf(buf)
+	chat.pane = pane
+	set_chat_text(chat, chat.text)
+	return pane
+end
+
+local function chat_for(bp)
+	local name = bp.Buf:GetName()
+	if is_chat_name(name) then
+		return chats[name]
+	end
+
+	local key
+	if name == "" or name == "No name" then
+		key = "untitled:" .. tostr(bp:ID())
+	else
+		key = name
+	end
+	local label = chat_label(name)
+	local chat_name = CHAT_PREFIX .. label
+	local chat = chats[chat_name]
+	if chat ~= nil and chat.key ~= key then
+		local i = 2
+		repeat
+			chat_name = CHAT_PREFIX .. label .. " (" .. i .. ")"
+			chat = chats[chat_name]
+			i = i + 1
+		until chat == nil or chat.key == key
+	end
+	if chat == nil then
+		chat = {
+			name = chat_name,
+			key = key,
+			label = label,
+			messages = {},
+			buf = nil,
+			pane = nil,
+			src_pane = bp,
+			busy = false,
+			text = "",
+		}
+		chats[chat_name] = chat
+	else
+		chat.src_pane = bp
+	end
+	return chat
+end
+
+-- ---------------------------------------------------------------------------
+-- commands
+-- ---------------------------------------------------------------------------
+
 function shinny(bp, args)
 	local query = trim(join_args(args))
 	if query == "" then
 		query = selected_text(bp)
 	end
 	if query == "" then
-		micro.InfoBar():Error("shinny: select some text first, or run > shinny <query>")
+		micro.InfoBar():Error("shinny: 先选中一些文字，或者运行 > shinny <query>")
 		return
 	end
 	start_search(query)
 end
 
--- shinny-raw reopens the last raw response; useful when Tavily (or a proxy)
--- returns something the plugin cannot parse.
 function shinny_raw(bp)
 	if last_response == nil then
-		micro.InfoBar():Error("shinny: no response yet")
+		micro.InfoBar():Error("shinny: 还没有请求过")
 		return
 	end
 	local pane = micro.CurPane()
 	if pane == nil then
-		micro.InfoBar():Error("shinny: no pane to show the response in")
+		micro.InfoBar():Error("shinny: 没有可以显示的分屏")
 		return
 	end
 	local buf = buffer.NewBuffer(last_response, "")
@@ -664,14 +1411,92 @@ function shinny_raw(bp)
 	pane:VSplitBuf(buf)
 end
 
+local function setting_command(name, label, args)
+	local text = trim(join_args(args))
+	if text == "" then
+		local current = tostr(option(name, ""))
+		micro.InfoBar():Message(string.format("shinny: %s = 「%s」", label, current == "" and "无" or current))
+		return
+	end
+	if text == "-" then
+		text = ""
+	end
+	set_setting(name, text)
+	micro.InfoBar():Message(string.format("shinny: %s 已设为「%s」", label, text == "" and "无" or text))
+end
+
+function shinny_prefix(bp, args)
+	setting_command("prefix", "前缀", args)
+end
+
+function shinny_suffix(bp, args)
+	setting_command("suffix", "后缀", args)
+end
+
+function shinny_backend(bp, args)
+	local value = trim(join_args(args))
+	if value == "" then
+		micro.InfoBar():Message("shinny: backend = " .. current_backend() .. "（tavily | deepseek）")
+		return
+	end
+	value = value:lower()
+	if value ~= "tavily" and value ~= "deepseek" then
+		micro.InfoBar():Error("shinny: backend 只能是 tavily 或 deepseek")
+		return
+	end
+	set_setting("backend", value)
+	micro.InfoBar():Message("shinny: backend = " .. value)
+end
+
+function shinny_chat(bp, args)
+	if bp == nil then
+		micro.InfoBar():Error("shinny: 没有活动窗格")
+		return
+	end
+
+	if is_chat_name(bp.Buf:GetName()) then
+		local chat = chats[bp.Buf:GetName()]
+		if chat ~= nil then
+			ask_chat(chat)
+		end
+		return
+	end
+
+	local chat = chat_for(bp)
+	if chat == nil then
+		micro.InfoBar():Error("shinny: 无法创建 chat")
+		return
+	end
+	ensure_chat_pane(bp, chat)
+	ask_chat(chat)
+end
+
 function init()
-	config.RegisterGlobalOption("shinny", "apikey", "")
+	load_state()
+
+	config.RegisterGlobalOption("shinny", "prefix", DEFAULT_PREFIX)
+	config.RegisterGlobalOption("shinny", "suffix", "")
+	config.RegisterGlobalOption("shinny", "backend", "tavily")
 	config.RegisterGlobalOption("shinny", "maxresults", 5)
 	config.RegisterGlobalOption("shinny", "depth", "basic")
 	config.RegisterGlobalOption("shinny", "includeanswer", true)
+	config.RegisterGlobalOption("shinny", "apikey", "")
 	config.RegisterGlobalOption("shinny", "endpoint", DEFAULT_ENDPOINT)
+	config.RegisterGlobalOption("shinny", "deepseekkey", "")
+	config.RegisterGlobalOption("shinny", "deepseektoolsurl", DEFAULT_DS_SEARCH)
+	config.RegisterGlobalOption("shinny", "chaturl", DEFAULT_DS_CHAT)
+	config.RegisterGlobalOption("shinny", "chatmodel", "deepseek-chat")
+	config.RegisterGlobalOption("shinny", "chatcontext", 24000)
+
+	apply_state()
 
 	config.MakeCommand("shinny", shinny, config.NoComplete)
 	config.MakeCommand("shinny-raw", shinny_raw, config.NoComplete)
+	config.MakeCommand("shinny-prefix", shinny_prefix, config.NoComplete)
+	config.MakeCommand("shinny-suffix", shinny_suffix, config.NoComplete)
+	config.MakeCommand("shinny-backend", shinny_backend, config.NoComplete)
+	config.MakeCommand("shinny-chat", shinny_chat, config.NoComplete)
 	config.AddRuntimeFile("shinny", config.RTHelp, "help/shinny.md")
+
+	config.TryBindKey("Alt-i", "command:shinny-chat", false)
 end

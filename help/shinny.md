@@ -1,55 +1,98 @@
 # shinny
 
-Search the web with [Tavily](https://tavily.com) for the text you have selected
-in micro, and show the results in a split.
+用 Tavily 或 DeepSeek 搜索选中的文字，并在分屏里查看结果；还可以在正在编辑的文件旁打开一个专属的 LLM 对话分屏，让它帮你解释、改写选中的内容。
 
-## Setup
+## 搜索
 
-Give the plugin a Tavily API key once:
+选中文字，按 `Alt-s`（或运行 `> shinny`）。
 
-    > set shinny.apikey tvly-your-key
+实际查询 = 前缀 + 选中文字 + 后缀。默认前缀是「什么是」，所以选中 `NVME集群` 会搜索 `什么是NVME集群`。每次搜索都会在结果顶部和信息栏显示当前的前缀与后缀。
 
-The value is written to `settings.json`. Alternatively, export
-`TAVILY_API_KEY` before starting micro; the environment variable wins over the
-setting.
+修改前缀/后缀（会保存到 `shinny.json`，重启后仍然生效）：
 
-The plugin shells out to `curl`, so `curl` has to be on your `PATH`.
+    > shinny-prefix 请问
+    > shinny-suffix 是什么
+    > shinny-prefix -          清除前缀
 
-## Usage
+不带参数时只显示当前值。
 
-Select some text (mouse drag, or `Shift` + arrow keys) and run the command:
+### 切换搜索后端
 
-    > shinny
+    > shinny-backend deepseek
+    > shinny-backend tavily
 
-The results open in a vertical split next to your file. A search without a
-selection is also possible:
+默认是 Tavily。DeepSeek 搜索使用官方 Search API
+（`https://api.deepseek.com/v1/tools/search`），需要 DeepSeek key：
 
-    > shinny lua coroutines
+    > set shinny.deepseekkey sk-...
 
-## Keybinding
+也可以使用环境变量 `DEEPSEEK_API_KEY`（优先于设置）。
 
-Bind the command in `bindings.json` (`> help keybindings`):
+## LLM Chat
+
+在任意文件里按 `Alt-i`：右侧打开这个文件专属的 chat 分屏，然后弹出输入框。输入问题回车即可；再问一次就再按 `Alt-i`。
+
+Chat 能看到：
+
+* 当前文件和其他所有打开的文件（内容按预算截断）
+* 光标所在行/列、选中的文本
+* 最近一次 Tavily / DeepSeek 搜索的结果
+
+可以直接让它改文件，例如：
+
+* `解释光标处的代码`
+* `把选区改写成更专业的语言`
+* `把这行改成英文`
+
+模型会用下面的块描述修改，shinny 立即写入文件（`Ctrl-Z` 可撤销）：
+
+    <<<SHINNY_EDIT selection>>>
+    新的选区内容
+    <<<SHINNY_EDIT_END>>>
+
+target 支持 `selection`（替换选区）、`cursor`（插入到光标处）、`line`（替换光标所在行）。
+
+Chat 使用 DeepSeek Chat API（`deepseek-chat`），与搜索共用同一个 key。
+
+## 快捷键
+
+* `Alt-s`：搜索选区
+* `Alt-i`：打开/继续当前文件的 chat
+
+`Alt-s` 需要在 `bindings.json` 里绑定（`> help keybindings`）：
 
     "Alt-s": "command:shinny"
 
-## Options
+插件首次加载时会自动绑定 `Alt-i`（如果该键未被占用）。
 
-* `shinny.apikey`: Tavily API key. Default: empty.
-* `shinny.maxresults`: number of results, 1–20. Default: `5`.
-* `shinny.depth`: `basic` or `advanced` search depth. Default: `basic`.
-* `shinny.includeanswer`: include Tavily's short answer. Default: `true`.
-* `shinny.endpoint`: search endpoint. Default:
-  `https://api.tavily.com/search`.
+## 命令
 
-## Troubleshooting
+| 命令 | 说明 |
+| --- | --- |
+| `shinny [query]` | 搜索选区或给定文字 |
+| `shinny-prefix [text]` | 查看/设置搜索前缀（`-` 清除） |
+| `shinny-suffix [text]` | 查看/设置搜索后缀（`-` 清除） |
+| `shinny-backend [tavily\|deepseek]` | 查看/切换搜索后端 |
+| `shinny-chat` | 打开当前文件的 chat 分屏 |
+| `shinny-raw` | 打开上一次请求的原始响应 |
 
-If a search fails, the info bar shows why. `> shinny-raw` opens the last raw
-response in a split — useful when Tavily (or a proxy) returns HTML or an
-unexpected payload.
+## 选项
 
-## Notes
+| 选项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `shinny.apikey` | 空 | Tavily key |
+| `shinny.deepseekkey` | 空 | DeepSeek key（搜索 + chat） |
+| `shinny.prefix` / `shinny.suffix` | `什么是` / 空 | 搜索前后缀 |
+| `shinny.backend` | `tavily` | `tavily` 或 `deepseek` |
+| `shinny.maxresults` | `5` | 结果数量（Tavily ≤20，DeepSeek ≤50） |
+| `shinny.depth` | `basic` | Tavily 搜索深度 |
+| `shinny.includeanswer` | `true` | Tavily 是否附带 answer |
+| `shinny.endpoint` | Tavily 地址 | 自定义 Tavily 端点 |
+| `shinny.deepseektoolsurl` | DeepSeek Search 地址 | 自定义 DeepSeek 搜索端点 |
+| `shinny.chaturl` | DeepSeek Chat 地址 | 自定义 chat 端点 |
+| `shinny.chatmodel` | `deepseek-chat` | chat 模型 |
+| `shinny.chatcontext` | `24000` | 发给 chat 的文件上下文字符预算 |
 
-* The query, key and endpoint are passed to `curl` through environment
-  variables, so selection text never has to be shell-quoted.
-* Runs in the background; micro stays responsive while the request is in
-  flight.
+## 排错
+
+搜索或 chat 出错时，信息栏会显示原因；`> shinny-raw` 可以打开上一次请求的原始响应，方便判断是 API 报错、代理页面还是网络问题。
