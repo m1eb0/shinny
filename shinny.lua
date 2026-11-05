@@ -1,4 +1,4 @@
-VERSION = "0.7.3"
+VERSION = "0.7.4"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -54,6 +54,8 @@ local chats_by_input = {}
 local chats_by_key = {}
 local TICK = 0
 local WATCHDOG_STARTED = false
+local LAST_LOG_PATH = nil
+local LOG_LIMIT = 800000
 local PROCESS_TOKEN = (tostring({}):match("0x(%x+)") or tostring(math.random(100000, 999999)))
 
 local function tostr(v)
@@ -1265,6 +1267,7 @@ function chat_settings()
 		model = model,
 		thinking = option_bool("thinking", true),
 		effort = normalize_effort(option("effort", DEFAULT_EFFORT)),
+		max_tokens = math.floor(option_number("maxtokens", 65536)),
 	}
 end
 
@@ -1327,6 +1330,43 @@ end
 
 local function chat_dir()
 	return config.ConfigDir .. "/shinny/chats"
+end
+
+local function log_append(chat, text)
+	if chat == nil or chat.log_parts == nil then
+		return
+	end
+	text = tostr(text)
+	if chat.log_size + #text > LOG_LIMIT then
+		if not chat.log_truncated then
+			chat.log_truncated = true
+			chat.log_parts[#chat.log_parts + 1] = "\n[log truncated]\n"
+			chat.log_size = chat.log_size + 17
+		end
+		return
+	end
+	chat.log_parts[#chat.log_parts + 1] = text
+	chat.log_size = chat.log_size + #text
+end
+
+local function log_dir()
+	return config.ConfigDir .. "/shinny/logs"
+end
+
+local function log_flush(chat)
+	if chat == nil or chat.log_parts == nil then
+		return
+	end
+	local text = table.concat(chat.log_parts)
+	chat.log_parts = nil
+	chat.log_size = 0
+	local dir = log_dir()
+	pcall(os.MkdirAll, dir, 448)
+	local path = dir .. "/last-stream.log"
+	local ok = pcall(ioutil.WriteFile, path, text, 384)
+	if ok then
+		LAST_LOG_PATH = path
+	end
 end
 
 local function hash_key(key)
@@ -1702,6 +1742,9 @@ local function build_request(chat)
 		'"stream_options":{"include_usage":true}',
 		'"tools":' .. TOOLS_JSON,
 	}
+	if settings.max_tokens ~= nil and settings.max_tokens > 0 then
+		parts[#parts + 1] = '"max_tokens":' .. tostring(math.floor(settings.max_tokens))
+	end
 	if settings.thinking then
 		parts[#parts + 1] = '"thinking":{"type":"enabled"}'
 		parts[#parts + 1] = '"reasoning_effort":"' .. json_escape(settings.effort) .. '"'
@@ -1924,6 +1967,20 @@ function start_request(chat)
 	chat.sbuf = ""
 	chat.raw = ""
 	chat.think_bucket = 0
+	if option_bool("debug", true) then
+		chat.log_parts = {}
+		chat.log_size = 0
+		chat.log_truncated = false
+		local st = chat_settings()
+		log_append(chat, string.format(
+			"=== shinny stream ===\nkey=%s\nmodel=%s thinking=%s effort=%s max_tokens=%s messages=%d body_bytes=%d\n",
+			tostr(chat.key), st.model, tostring(st.thinking), st.effort, tostring(st.max_tokens), #chat.messages, #body
+		))
+		pcall(os.MkdirAll, log_dir(), 448)
+	else
+		chat.log_parts = nil
+		chat.log_size = 0
+	end
 	chat.text = render_chat(chat, true)
 	replace_chat_text(chat, chat.text)
 
@@ -1974,6 +2031,12 @@ end
 
 function handle_stream_chunk(chat, chunk)
 	chat.last_activity = TICK
+	if chat.log_parts ~= nil then
+		chat.log_chunks = (chat.log_chunks or 0) + 1
+		log_append(chat, string.format("[chunk %d bytes=%d]\n", chat.log_chunks, #tostr(chunk)))
+		log_append(chat, tostr(chunk))
+		log_append(chat, "\n")
+	end
 	chat.sbuf = (chat.sbuf or "") .. tostr(chunk)
 	chat.raw = (chat.raw or "") .. tostr(chunk)
 	while true do
@@ -2035,6 +2098,10 @@ function handle_stream_chunk(chat, chunk)
 end
 
 function finalize_timeout(chat)
+	if chat.log_parts ~= nil then
+		log_append(chat, "\n=== timeout ===\n")
+		log_flush(chat)
+	end
 	if chat.body_path ~= nil then
 		pcall(os.Remove, chat.body_path)
 		chat.body_path = nil
@@ -2078,6 +2145,10 @@ local function watch_chats()
 end
 
 function finalize_cancel(chat)
+	if chat.log_parts ~= nil then
+		log_append(chat, "\n=== canceled ===\n")
+		log_flush(chat)
+	end
 	local partial = chat.stream and chat.stream.content or ""
 	local content = partial ~= "" and (partial .. "\n\n（已停止）") or "（已停止）"
 	chat.messages[#chat.messages + 1] = {
@@ -2113,6 +2184,14 @@ function handle_stream_exit(chat, output)
 	local partial = chat.stream.content or ""
 	local tools = chat.stream.tools or {}
 	chat.streaming = false
+	if chat.log_parts ~= nil then
+		log_append(chat, string.format(
+			"\n=== exit ===\nstatus=%s finished=%s finish_reason=%s content=%d reasoning=%d tools=%d canceled=%s timeout=%s\n",
+			tostr(status), tostring(chat.stream.finished), tostr(chat.stream.finish_reason),
+			#partial, #(chat.stream.reasoning or ""), #tools, tostring(chat.canceled), tostring(chat.timeout)
+		))
+		log_flush(chat)
+	end
 
 	if chat.canceled then
 		finalize_cancel(chat)
@@ -2694,6 +2773,7 @@ local function render_help()
 	add("- `shinny-effort [low|high|max]` — 查看/设置思考强度")
 	add("- `shinny-chat-new` — 清空当前文件的会话")
 	add("- `shinny-usage` — 显示 token / cache 用量")
+	add("- `shinny-log` — 打开上一次请求的调试日志")
 	add("- `shinny-preview` — 把当前 Markdown 或最后一条回答渲染到新 tab")
 	add("- `shinny-chat-stop` — 停止正在生成的回复")
 	add("- `shinny-image [path]` — 附加图片到下一问（不带参数读剪贴板）")
@@ -2714,13 +2794,14 @@ local function render_help()
 	add("- DeepSeek key：" .. (api_key("deepseek") ~= "" and "已配置" or "未配置"))
 	add("- 结果数量：`" .. tostr(math.floor(option_number("maxresults", 5))) .. "`")
 	add("- 上下文预算：`" .. tostr(math.floor(option_number("chattokenbudget", 24000))) .. "` tokens")
+	add("- 最大输出：`" .. tostr(math.floor(option_number("maxtokens", 65536))) .. "` tokens")
 	add("- 图片 detail：" .. image_detail() .. "（上限 " .. tostr(math.floor(option_number("imagemaxmb", 12))) .. " MB/张）")
 	add("")
 	add("## 常用选项")
 	add("")
 	add("`shinny.prefix`、`shinny.suffix`、`shinny.backend`、`shinny.apikey`、")
 	add("`shinny.deepseekkey`、`shinny.chatmodel`、`shinny.thinking`、`shinny.effort`、")
-	add("`shinny.maxresults`、`shinny.chatcontext`、`shinny.chattokenbudget`、`shinny.showthinking`、`shinny.imagedetail`、`shinny.imagemaxmb`")
+	add("`shinny.maxresults`、`shinny.chatcontext`、`shinny.chattokenbudget`、`shinny.showthinking`、`shinny.imagedetail`、`shinny.imagemaxmb`、`shinny.maxtokens`、`shinny.debug`")
 	add("")
 	add("完整文档：`> help shinny`")
 	return table.concat(lines, "\n") .. "\n"
@@ -3241,6 +3322,59 @@ function shinny_preview(bp, args)
 	show_preview(target, label, rendered)
 end
 
+function shinny_log(bp, args)
+	if bp == nil then
+		return
+	end
+	local path = LAST_LOG_PATH or (log_dir() .. "/last-stream.log")
+	local text = read_text_file(path)
+	if text == nil then
+		micro.InfoBar():Error("shinny: 还没有日志文件 " .. path)
+		return
+	end
+	local name = "shinny log"
+	local buf = nil
+	local ok = pcall(function()
+		bp:AddTab()
+	end)
+	if ok then
+		local tabs = micro.Tabs()
+		local tab = tabs.List[#tabs.List]
+		local pane = tab and tab.Panes[1]
+		if pane ~= nil then
+			buf = pane.Buf
+			pcall(function()
+				buf:SetName(name)
+			end)
+		end
+	end
+	if buf == nil then
+		buf = buffer.NewBuffer("", "")
+		buf:SetName(name)
+		bp:VSplitIndex(buf, true)
+	end
+	local old = buffer_text(buf)
+	if #old > 0 then
+		local n = 0
+		pcall(function()
+			n = buf:LinesNum()
+		end)
+		local last = ""
+		pcall(function()
+			last = tostr(buf:Line(n - 1))
+		end)
+		pcall(function()
+			buf:Remove(buffer.Loc(0, 0), buffer.Loc(#last, n - 1))
+		end)
+	end
+	buf:Insert(buffer.Loc(0, 0), text)
+	set_filetype(buf, "log", true)
+	pcall(function()
+		buf:SetOption("readonly", true)
+	end)
+	micro.InfoBar():Message("shinny: log " .. path)
+end
+
 function shinny_chat(bp, args)
 	if bp == nil then
 		micro.InfoBar():Error("shinny: 没有活动窗格")
@@ -3293,6 +3427,8 @@ function init()
 	config.RegisterGlobalOption("shinny", "thinking", true)
 	config.RegisterGlobalOption("shinny", "effort", DEFAULT_EFFORT)
 	config.RegisterGlobalOption("shinny", "chatcontext", 24000)
+	config.RegisterGlobalOption("shinny", "maxtokens", 65536)
+	config.RegisterGlobalOption("shinny", "debug", true)
 	config.RegisterGlobalOption("shinny", "chattokenbudget", 24000)
 	config.RegisterGlobalOption("shinny", "showthinking", false)
 	config.RegisterGlobalOption("shinny", "imagedetail", "auto")
@@ -3316,6 +3452,7 @@ function init()
 	config.MakeCommand("shinny-image-detail", shinny_image_detail, config.NoComplete)
 	config.MakeCommand("shinny-chat-newline", shinny_chat_newline, config.NoComplete)
 	config.MakeCommand("shinny-preview", shinny_preview, config.NoComplete)
+	config.MakeCommand("shinny-log", shinny_log, config.NoComplete)
 	config.MakeCommand("shinny-model", shinny_model, config.NoComplete)
 	config.MakeCommand("shinny-thinking", shinny_thinking, config.NoComplete)
 	config.MakeCommand("shinny-effort", shinny_effort, config.NoComplete)

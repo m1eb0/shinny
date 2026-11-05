@@ -53,6 +53,7 @@ Chat 能看到：
 Chat 的行为：
 
 * **流式输出**：回答边生成边显示；收到 `[DONE]` 立即收尾；单次请求最长 30 分钟；60 秒无数据会保留部分内容并结束；`finish_reason=length` 或连接中断会标注“回答可能不完整”；`Esc` 可随时停止
+* **调试日志**：默认记录到 `~/.config/micro/shinny/logs/last-stream.log`（原始 SSE、退出状态、finish_reason），用 `> shinny-log` 打开查看；可用 `shinny.debug` 关闭
 * **思考模式**：`reasoning_content` 单独保存，`shinny.showthinking` 打开后显示
 * **会话持久化**：每个文件的会话保存在 `~/.config/micro/shinny/chats/`，重启 micro 可恢复
 * **用量可见**：顶部显示 token 用量与 cache 命中率；`> shinny-usage` 查看累计值；`> shinny-chat-new` 清空会话
@@ -112,6 +113,7 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny-chat-new` | 清空当前文件的会话 |
 | `shinny-usage` | 显示本次会话的 token / cache 用量 |
 | `shinny-preview` | 在新 tab 渲染当前 Markdown（或最后一条回答）（`Alt-r`） |
+| `shinny-log` | 在新 tab 打开上一次请求的调试日志 |
 | `shinny-chat-stop` | 停止正在生成的回复（同 `Esc`） |
 | `shinny-chat-newline` | 在输入栏插入换行（`Alt-Enter` 绑定） |
 | `shinny-image [path]` | 附加图片到下一问；不带参数读剪贴板 |
@@ -141,6 +143,8 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny.showthinking` | `false` | 是否在对话里显示思考内容 |
 | `shinny.imagedetail` | `auto` | 图片 detail：`low` / `high` / `original` / `auto` |
 | `shinny.imagemaxmb` | `12` | 单张图片大小上限（MB） |
+| `shinny.maxtokens` | `65536` | 单次回答最大输出 tokens |
+| `shinny.debug` | `true` | 记录流式调试日志 |
 
 
 ## 外观

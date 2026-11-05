@@ -857,6 +857,7 @@ test("sends the model and thinking settings", function()
 	assert_contains(state.job_env.BODY, '"model":"deepseek-flash"')
 	assert_contains(state.job_env.BODY, '"thinking":{"type":"enabled"}')
 	assert_contains(state.job_env.BODY, '"reasoning_effort":"high"')
+	assert_contains(state.job_env.BODY, '"max_tokens":65536')
 	assert_contains(transcript_pane().Buf:text(), "deepseek-flash · thinking high")
 end)
 
@@ -1017,6 +1018,25 @@ test("warns when the model output hits its limit", function()
 	run(shinny_chat, bp, nil)
 	ask("long answer")
 	assert_contains(transcript_pane().Buf:text(), "达到模型输出上限")
+end)
+
+test("debug log records the raw stream and exit", function()
+	local bp = setup_search("tavily")
+	state.chat_sse = CHAT_TEXT
+	run(shinny_chat, bp, nil)
+	ask("log this")
+
+	local log = nil
+	for path, data in pairs(state.files) do
+		if path:find("/logs/last-stream.log", 1, true) then
+			log = data
+		end
+	end
+	assert_true(log ~= nil, "no debug log written")
+	assert_contains(log, "shinny stream")
+	assert_contains(log, "[chunk")
+	assert_contains(log, "=== exit")
+	assert_contains(log, "finish_reason=stop")
 end)
 
 test("chat persists the conversation to disk", function()
