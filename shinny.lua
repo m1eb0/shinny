@@ -1,4 +1,4 @@
-VERSION = "0.5.3"
+VERSION = "0.5.4"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -2117,6 +2117,7 @@ local function reset_input(chat)
 			chat.ipane:GotoLoc(loc)
 		end)
 	end
+	resize_chat_input(chat)
 end
 
 local function read_input(chat)
@@ -2134,6 +2135,31 @@ local function focus_input(chat)
 		chat.ipane = pane
 	end
 	return pane
+end
+
+function resize_chat_input(chat)
+	if chat == nil or chat.ipane == nil or chat.ibuf == nil then
+		return
+	end
+	local lines = 1
+	pcall(function()
+		lines = chat.ibuf:LinesNum()
+	end)
+	if type(lines) ~= "number" or lines < 1 then
+		lines = 1
+	end
+	if lines > 8 then
+		lines = 8
+	end
+	local h = 0
+	pcall(function()
+		h = chat.src_pane:Tab().H
+	end)
+	if type(h) == "number" and h > lines + 2 then
+		pcall(function()
+			chat.ipane:ResizePane(h - (lines + 1))
+		end)
+	end
 end
 
 local function ensure_chat_panes(bp, chat)
@@ -2157,15 +2183,7 @@ local function ensure_chat_panes(bp, chat)
 		ipane = tpane:HSplitIndex(chat.ibuf, true)
 		chat.ipane = ipane
 		reset_input(chat)
-		local tab = bp:Tab()
-		local ok, h = pcall(function()
-			return tab.H
-		end)
-		if ok and type(h) == "number" and h > 10 then
-			pcall(function()
-				ipane:ResizePane(h - 6)
-			end)
-		end
+		resize_chat_input(chat)
 	end
 
 	if chat.buf == nil then
@@ -2188,6 +2206,10 @@ local function insert_input_newline(bp)
 	pcall(function()
 		cursor:GotoLoc(buffer.Loc(0, y + 1))
 	end)
+	local chat = chats_by_input[tostr(bp.Buf:GetName())]
+	if chat ~= nil then
+		resize_chat_input(chat)
+	end
 end
 
 function preInsertNewline(bp)

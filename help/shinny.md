@@ -30,7 +30,7 @@
 
 ## LLM Chat
 
-在任意文件里按 `Alt-i`：右侧打开这个文件专属的 chat 分屏，上方是对话记录，下方是输入栏（`>`）。直接输入问题，按 Enter 发送，`Shift+Enter` 换行；再按 `Alt-i` 会把焦点带回输入栏。
+在任意文件里按 `Alt-i`：右侧打开这个文件专属的 chat 分屏，上方是对话记录，下方是输入栏（`>`，会随内容自动增高，最多 8 行）。直接输入问题，按 Enter 发送，`Shift+Enter` 换行；再按 `Alt-i` 会把焦点带回输入栏。
 
 > `Shift+Enter` 在普通编辑区和 chat 输入栏都可用（普通编辑区会沿用当前行缩进）；它需要终端把它映射成 `Alt-Enter`。Ghostty 在 `~/.config/ghostty/config.ghostty` 写 `keybind = shift+enter=text:\x1b\r`，然后 `ctrl+shift+,` 重载配置。原因：micro 2.0.15 的 tcell 还不认识 Ghostty 默认发的 `CSI 27;2;13~`，会把 `ESC [` 当成 `Alt-[` 从而跳到 buffer 开头。插件已把 `Alt-Enter` 绑定到输入栏换行。
 
