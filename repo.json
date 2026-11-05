@@ -1,0 +1,17 @@
+[
+	{
+		"Name": "shinny",
+		"Description": "Search the current selection with Tavily and show the results in a split.",
+		"Website": "https://github.com/miebo/shinny",
+		"Tags": ["tavily", "search", "web", "selection"],
+		"Versions": [
+			{
+				"Version": "0.1.0",
+				"Url": "https://github.com/miebo/shinny/archive/v0.1.0.zip",
+				"Require": {
+					"micro": ">=2.0.0"
+				}
+			}
+		]
+	}
+]
