@@ -30,6 +30,15 @@ Tavily 支持不同花费和结果的模式，用 `shinny-mode` 切换：
 
 Research 会在搜索结果 tab 里流式显示进度、来源和报告。模式只对 Tavily 生效。
 
+### 打开网页链接
+
+搜索结果里的 URL 直接单击即可用浏览器打开。光标停在含链接的行上时：
+
+    > shinny-open-url
+    Alt-o
+
+也可以 `> shinny-open-url https://...` 直接打开。使用 `xdg-open`（macOS 用 `open`）。
+
 ### 切换搜索后端
 
     > shinny-backend deepseek
@@ -123,6 +132,7 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny-suffix [text]` | 查看/设置搜索后缀（`-` 清除） |
 | `shinny-backend [tavily\|deepseek]` | 查看/切换搜索后端 |
 | `shinny-mode [quick\|ultra\|simple\|deep\|research-mini\|research-pro]` | 查看/切换搜索模式 |
+| `shinny-open-url [url]` | 打开光标行/指定 HTTP(S) 链接 |
 | `shinny-chat` | 打开当前文件的 chat 分屏 |
 | `shinny-model [name]` | 查看/切换 chat 模型（`deepseek-flash`、`deepseek-v4-pro`） |
 | `shinny-thinking [on\|off]` | 查看/切换思考模式 |

@@ -1,4 +1,4 @@
-VERSION = "0.8.2"
+VERSION = "0.8.3"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -142,6 +142,66 @@ local function shorten(s, limit)
 		return s
 	end
 	return clamp(s, limit) .. "…"
+end
+
+local function shell_quote(text)
+	return "'" .. tostr(text):gsub("'", "'\\''") .. "'"
+end
+
+local function extract_url(line, col)
+	line = tostr(line)
+	local best = nil
+	local best_start = nil
+	local best_end = nil
+	local best_dist = nil
+	for url in line:gmatch("https?://[%w%-%._~:/?#%[%]@!$&'()*+,;=%%]+") do
+		local start = line:find(url, 1, true)
+		if start ~= nil then
+			local finish = start + #url - 1
+			local dist = 0
+			if col ~= nil then
+				if col < start then
+					dist = start - col
+				elseif col > finish then
+					dist = col - finish
+				end
+			end
+			if best == nil or dist < best_dist then
+				best = url
+				best_start = start
+				best_end = finish
+				best_dist = dist
+			end
+		end
+	end
+	if best == nil then
+		return nil
+	end
+	local cleaned = best:gsub("[%.%,;:!%?%)%]%}'\"]+$", "")
+	if cleaned == "" then
+		return nil
+	end
+	return cleaned
+end
+
+local function open_url(url)
+	url = trim(url)
+	if not url:match("^https?://") then
+		micro.InfoBar():Error("shinny: 只支持 http(s) 链接")
+		return false
+	end
+	local opener = "xdg-open"
+	if type(jit) == "table" and jit.os == "OSX" then
+		opener = "open"
+	end
+	local cmd = opener .. " " .. shell_quote(url)
+	local ok, err = pcall(shell.JobStart, cmd)
+	if not ok then
+		micro.InfoBar():Error("shinny: 无法打开浏览器 — " .. shorten(collapse(tostr(err)), 120))
+		return false
+	end
+	micro.InfoBar():Message("shinny: 打开 " .. shorten(url, 100))
+	return true
 end
 
 -- utf8_sub keeps at most maxchars characters (not bytes).
@@ -3375,6 +3435,8 @@ local function render_help()
 	add("- `shinny-suffix [text]` — 查看/设置后缀（`-` 清除）")
 	add("- `shinny-backend [tavily|deepseek]` — 查看/切换搜索后端")
 	add("- `shinny-mode [quick|ultra|simple|deep|research-mini|research-pro]` — 搜索/研究模式与花费")
+	add("- `shinny-open-url [url]` — 打开光标所在行/指定网页链接")
+	add("- `Alt-o` — 打开光标所在行的网页链接；在搜索结果 tab 里可直接点击链接")
 	add("- `shinny-chat` — 打开当前文件的 chat，等同 `Alt-i`")
 	add("- `shinny-model [name]` — 查看/切换模型")
 	add("- `shinny-thinking [on|off]` — 查看/切换思考模式")
@@ -3479,6 +3541,50 @@ end
 
 function shinny_suffix(bp, args)
 	setting_command("suffix", "后缀", args)
+end
+
+function shinny_open_url(bp, args)
+	local url = trim(join_args(args))
+	local line = ""
+	local col = 0
+	if bp ~= nil and bp.Buf ~= nil then
+		local cur = bp.Buf:GetActiveCursor()
+		local loc = cur.Loc or cur
+		col = loc.X or 0
+		line = tostr(bp.Buf:Line(loc.Y))
+	end
+	if url == "" then
+		url = extract_url(line, col) or ""
+	end
+	if url == "" then
+		micro.InfoBar():Error("shinny: 光标所在行没有 http(s) 链接")
+		return
+	end
+	open_url(url)
+end
+
+function onMousePress(bp, e)
+	if bp == nil or bp.Buf == nil then
+		return false
+	end
+	if tostr(bp.Buf:GetName()) ~= SEARCH_TAB_NAME then
+		return false
+	end
+	local buttons = 1
+	pcall(function()
+		buttons = e:Buttons()
+	end)
+	if buttons ~= 1 then
+		return false
+	end
+	local cur = bp.Buf:GetActiveCursor()
+	local loc = cur.Loc or cur
+	local line = tostr(bp.Buf:Line(loc.Y))
+	local url = extract_url(line, loc.X)
+	if url == nil then
+		return false
+	end
+	return open_url(url)
 end
 
 function shinny_mode(bp, args)
@@ -4094,6 +4200,7 @@ function init()
 	config.MakeCommand("shinny-suffix", shinny_suffix, config.NoComplete)
 	config.MakeCommand("shinny-backend", shinny_backend, config.NoComplete)
 	config.MakeCommand("shinny-mode", shinny_mode, config.NoComplete)
+	config.MakeCommand("shinny-open-url", shinny_open_url, config.NoComplete)
 	config.MakeCommand("shinny-chat", shinny_chat, config.NoComplete)
 	config.MakeCommand("shinny-help", shinny_help, config.NoComplete)
 	config.MakeCommand("shinny-chat-new", shinny_chat_new, config.NoComplete)
@@ -4118,6 +4225,7 @@ function init()
 	config.TryBindKey("Alt-i", "command:shinny-chat", false)
 	config.TryBindKey("Alt-Enter", "command:shinny-chat-newline", false)
 	config.TryBindKey("Alt-r", "command:shinny-preview", false)
+	config.TryBindKey("Alt-o", "command:shinny-open-url", false)
 	start_input_watch()
 	if not WATCHDOG_STARTED then
 		WATCHDOG_STARTED = true

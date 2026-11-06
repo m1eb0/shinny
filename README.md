@@ -70,6 +70,8 @@ Tavily 模式（花费按 Tavily 官方 credit 计）：
 
 Research 会在结果 tab 里实时显示进度、来源和最终报告；研究请求可能持续几分钟。这些模式只对 Tavily 生效；DeepSeek 搜索仍使用它的 `count` 参数。
 
+结果 tab 里的网页链接可以直接**单击**打开浏览器；把光标放在任意含链接的行上按 `Alt-o`，或执行 `> shinny-open-url [url]` 也可以。浏览器使用 `xdg-open`（macOS 用 `open`）。
+
 前缀/后缀/后端/模式会保存到 `~/.config/micro/shinny.json`，重启后仍然生效。每次搜索时，信息栏和结果头部都会显示当前的前缀与后缀。
 
 DeepSeek 搜索走官方 `POST /v1/tools/search`，需要 DeepSeek key；两个后端都支持分页数量、结果标题/URL/摘要/评分。
@@ -158,6 +160,7 @@ micro 本身只做 Markdown 语法高亮，不渲染排版。编辑文件时按 
 | `shinny-suffix [text]` | 查看/设置后缀 |
 | `shinny-backend [tavily\|deepseek]` | 查看/切换搜索后端 |
 | `shinny-mode [quick\|ultra\|simple\|deep\|research-mini\|research-pro]` | 查看/切换搜索模式 |
+| `shinny-open-url [url]` | 打开光标所在行/指定 HTTP(S) 链接 |
 | `shinny-chat` | 打开当前文件的 chat，等同于 `Alt-i` |
 | `shinny-model [name]` | 查看/切换模型 |
 | `shinny-thinking [on\|off]` | 查看/切换思考模式 |

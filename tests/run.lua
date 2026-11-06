@@ -741,6 +741,32 @@ test("research mode streams a report and sources", function()
 	state.options["shinny.searchmode"] = "simple"
 end)
 
+test("shinny-open-url opens the URL on the cursor line", function()
+	local bp = setup_search("tavily")
+	state.search_output = SAMPLE
+	run(shinny, bp, nil)
+	local pane = state.panes[#state.panes]
+	local y = nil
+	for i = 0, pane.Buf:LinesNum() - 1 do
+		if tostring(pane.Buf:Line(i)):find("https://example.test/nvme", 1, true) then
+			y = i
+			break
+		end
+	end
+	assert_true(y ~= nil, "URL line missing from results")
+	local cur = pane.Buf:GetActiveCursor()
+	cur.X = 4
+	cur.Y = y
+	state.commands["shinny-open-url"](pane, {})
+	assert_contains(state.last_cmd, "xdg-open")
+	assert_contains(state.last_cmd, "https://example.test/nvme")
+
+	cur.X = 4
+	cur.Y = y
+	assert_true(onMousePress(pane, { Buttons = function() return 1 end }) == true, "click did not open URL")
+	assert_contains(state.last_cmd, "https://example.test/nvme")
+end)
+
 test("shinny-backend switches to DeepSeek search", function()
 	local bp = setup_search("tavily")
 	state.commands["shinny-backend"](bp, { "deepseek" })
