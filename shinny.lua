@@ -1,4 +1,4 @@
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -1635,7 +1635,10 @@ local function window_messages(chat)
 	return out
 end
 
-local function build_request(chat)
+local function build_request(chat, stream_mode)
+	if stream_mode == nil then
+		stream_mode = true
+	end
 	local settings = chat_settings()
 	local msgs = {}
 	local function add(x)
@@ -1681,10 +1684,12 @@ local function build_request(chat)
 	local parts = {
 		'"model":"' .. json_escape(settings.model) .. '"',
 		'"messages":[' .. table.concat(msgs, ",") .. ']',
-		'"stream":true',
-		'"stream_options":{"include_usage":true}',
+		'"stream":' .. (stream_mode and "true" or "false"),
 		'"tools":' .. TOOLS_JSON,
 	}
+	if stream_mode then
+		parts[#parts + 1] = '"stream_options":{"include_usage":true}'
+	end
 	if settings.max_tokens ~= nil and settings.max_tokens > 0 then
 		parts[#parts + 1] = '"max_tokens":' .. tostring(math.floor(settings.max_tokens))
 	end
@@ -1904,6 +1909,15 @@ local STREAM_CMD = 'curl -sS -N --http1.1 --keepalive-time 30 --max-time 1800 -X
 	.. ' -w "\\n' .. STATUS_MARKER .. ':%{http_code} ' .. NET_MARKER
 	.. ':%{http_version}|%{time_namelookup}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{time_total}|%{size_download}|%{speed_download}|%{num_connects}"'
 
+local NONSTREAM_CMD = 'curl -sS --http1.1 --keepalive-time 30 --max-time 1800 -X POST "$SHINNY_ENDPOINT"'
+	.. ' -H "Content-Type: application/json"'
+	.. ' -H "Accept: application/json"'
+	.. ' -H "Accept-Encoding: identity"'
+	.. ' -H "Authorization: Bearer $SHINNY_KEY"'
+	.. ' --data-binary @"$SHINNY_BODY_FILE"'
+	.. ' -w "\\n' .. STATUS_MARKER .. ':%{http_code} ' .. NET_MARKER
+	.. ':%{http_version}|%{time_namelookup}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{time_total}|%{size_download}|%{speed_download}|%{num_connects}"'
+
 local function accumulate_tool_calls(chat, list)
 	for _, d in ipairs(list) do
 		local idx = (tonumber(d.index) or 0) + 1
@@ -1947,13 +1961,17 @@ function start_request(chat)
 	chat.streaming = true
 	chat.canceled = false
 	chat.timeout = false
+	chat.nonstream = false
 	chat.waiting_note = nil
 	chat.last_activity = TICK
+	chat.started_tick = TICK
+	chat.received_chunk = false
 	chat.sbuf = ""
 	chat.raw = ""
 	chat.think_bucket = 0
 	REQ_SEQ = (REQ_SEQ or 0) + 1
-	chat.req_seq = REQ_SEQ
+	local req = REQ_SEQ
+	chat.req_seq = req
 	if option_bool("debug", true) then
 		chat.log_parts = {}
 		chat.log_size = 0
@@ -2001,11 +2019,15 @@ function start_request(chat)
 	micro.InfoBar():Message("shinny: streaming…")
 
 	local ok, job = pcall(shell.JobStart, STREAM_CMD, function(chunk)
-		handle_stream_chunk(chat, chunk)
+		if chat.req_seq == req then
+			handle_stream_chunk(chat, chunk)
+		end
 	end, nil, function(output)
 		os.Setenv("SHINNY_KEY", "")
 		os.Setenv("SHINNY_BODY", "")
-		handle_stream_exit(chat, output)
+		if chat.req_seq == req then
+			handle_stream_exit(chat, output)
+		end
 	end)
 
 	if not ok then
@@ -2029,6 +2051,7 @@ end
 
 function handle_stream_chunk(chat, chunk)
 	chat.last_activity = TICK
+	chat.received_chunk = true
 	chat.waiting_note = nil
 	if chat.log_parts ~= nil then
 		chat.log_chunks = (chat.log_chunks or 0) + 1
@@ -2137,9 +2160,10 @@ end
 local function watch_chats()
 	TICK = TICK + 1
 	for _, chat in pairs(chats) do
-		if chat.streaming and chat.job ~= nil then
+		if chat.streaming and chat.job ~= nil and not chat.nonstream then
 			local last = chat.last_activity or TICK
 			local idle = TICK - last
+			local elapsed = TICK - (chat.started_tick or TICK)
 			if idle >= 2 then
 				local seconds = idle * 5
 				if chat.waiting_note ~= seconds then
@@ -2149,20 +2173,58 @@ local function watch_chats()
 					net_write(chat)
 				end
 			end
-			local limit = math.max(2, math.floor(option_number("streamtimeout", 120) / 5))
-			if idle >= limit then
-				chat.timeout = true
+
+			local content = chat.stream and chat.stream.content or ""
+			local tools = chat.stream and chat.stream.tools or {}
+			local no_output = content == "" and #tools == 0
+			local first_limit = math.max(1, math.floor(option_number("firstbyttimeout", 15) / 5))
+			local stall_limit = math.max(2, math.floor(option_number("stalltimeout", 45) / 5))
+			local should_fallback = option_bool("streamfallback", true)
+				and not chat.fallback_attempted
+				and no_output
+				and ((not chat.received_chunk and elapsed >= first_limit) or (chat.received_chunk and idle >= stall_limit))
+
+			if should_fallback then
+				chat.fallback_attempted = true
 				local job = chat.job
 				chat.job = nil
+				chat.streaming = false
 				if job ~= nil then
 					pcall(shell.JobStop, job)
 				end
-				micro.After(0, function()
-					if chat.streaming then
-						chat.streaming = false
-						finalize_timeout(chat)
+				if chat.body_path ~= nil then
+					pcall(os.Remove, chat.body_path)
+					chat.body_path = nil
+				end
+				if chat.log_parts ~= nil then
+					log_append(chat, string.format(
+						"\n=== fallback nonstream ===\ntick=%d reason=stall content=%d reasoning=%d\n",
+						TICK, #content, #(chat.stream.reasoning or "")
+					))
+					log_flush(chat)
+				end
+				if chat.net_parts ~= nil then
+					net_append(chat, string.format("[net] fallback nonstream tick=%d idle=%ds\n", TICK, idle * 5))
+					net_flush(chat)
+				end
+				micro.InfoBar():Message("shinny: 流式未继续，改用非流式重试…")
+				start_nonstream_request(chat)
+			else
+				local limit = math.max(2, math.floor(option_number("streamtimeout", 120) / 5))
+				if idle >= limit then
+					chat.timeout = true
+					local job = chat.job
+					chat.job = nil
+					if job ~= nil then
+						pcall(shell.JobStop, job)
 					end
-				end)
+					micro.After(0, function()
+						if chat.streaming then
+							chat.streaming = false
+							finalize_timeout(chat)
+						end
+					end)
+				end
 			end
 		end
 	end
@@ -2189,6 +2251,81 @@ function finalize_cancel(chat)
 	save_chat(chat)
 	replace_chat_text(chat, render_chat(chat, false))
 	micro.InfoBar():Message("shinny: 已停止")
+end
+
+local function complete_turn(chat)
+	local partial = chat.stream.content or ""
+	local tools = chat.stream.tools or {}
+	chat.retries = 0
+	merge_usage(chat, chat.stream.usage)
+
+	if #tools > 0 then
+		chat.messages[#chat.messages + 1] = {
+			role = "assistant",
+			content = partial,
+			display = partial,
+			reasoning_content = chat.stream.reasoning,
+			tool_calls = tools,
+		}
+		for _, call in ipairs(tools) do
+			local name = tostr((call["function"] or {}).name)
+			local result, note = execute_tool(chat, call)
+			chat.messages[#chat.messages + 1] = {
+				role = "tool",
+				tool_call_id = call.id,
+				content = result,
+				display = name .. " · " .. note,
+			}
+		end
+		save_chat(chat)
+		chat.round = (chat.round or 0) + 1
+		replace_chat_text(chat, render_chat(chat, false))
+		if chat.round >= 4 then
+			chat.messages[#chat.messages + 1] = {
+				role = "assistant",
+				content = "（工具调用次数达到上限）",
+				display = "（工具调用次数达到上限）",
+			}
+			save_chat(chat)
+			replace_chat_text(chat, render_chat(chat, false))
+			return
+		end
+		start_request(chat)
+		return
+	end
+
+	local content = partial
+	local notes = {}
+	if content ~= "" then
+		local cleaned
+		cleaned, notes = apply_edits(chat, content)
+		content = cleaned
+	end
+	if content == "" and (chat.stream.reasoning or "") ~= "" then
+		content = "（只返回了思考内容，没有最终回答）"
+	end
+	local display = content
+	if #notes > 0 then
+		display = (display ~= "" and display .. "\n\n" or "") .. "▸ 已应用到文件：" .. table.concat(notes, "；")
+	end
+	local warning = nil
+	if chat.stream.finish_reason == "length" then
+		warning = "达到模型输出上限，回答可能不完整"
+	elseif not chat.stream.finished then
+		warning = "连接中断，回答可能不完整"
+	end
+	if warning ~= nil then
+		display = (display ~= "" and display .. "\n\n" or "") .. "▸ " .. warning
+	end
+	chat.messages[#chat.messages + 1] = {
+		role = "assistant",
+		content = content,
+		display = display,
+		reasoning_content = chat.stream.reasoning,
+	}
+	save_chat(chat)
+	replace_chat_text(chat, render_chat(chat, false))
+	micro.InfoBar():Message("shinny: 完成")
 end
 
 function handle_stream_exit(chat, output)
@@ -2269,76 +2406,204 @@ function handle_stream_exit(chat, output)
 		return
 	end
 
-	chat.retries = 0
-	merge_usage(chat, chat.stream.usage)
+	complete_turn(chat)
+end
 
-	if #tools > 0 then
+function start_nonstream_request(chat)
+	local key = chat_key()
+	if key == "" then
+		chat.streaming = false
+		chat.nonstream = false
+		micro.InfoBar():Error("shinny: 没有 DeepSeek key")
+		return
+	end
+	local url = trim(tostr(option("chaturl", DEFAULT_DS_CHAT)))
+	if url == "" then
+		url = DEFAULT_DS_CHAT
+	end
+	local body = build_request(chat, false)
+
+	chat.stream = { content = "", reasoning = "", tools = {}, usage = nil, finished = false }
+	chat.streaming = true
+	chat.nonstream = true
+	chat.canceled = false
+	chat.timeout = false
+	chat.waiting_note = nil
+	chat.last_activity = TICK
+	chat.started_tick = TICK
+	chat.received_chunk = false
+	chat.sbuf = ""
+	chat.raw = ""
+	chat.think_bucket = 0
+	REQ_SEQ = (REQ_SEQ or 0) + 1
+	local req = REQ_SEQ
+	chat.req_seq = req
+
+	if option_bool("debug", true) then
+		chat.log_parts = {}
+		chat.log_size = 0
+		chat.log_truncated = false
+		local st = chat_settings()
+		log_append(chat, string.format(
+			"=== shinny nonstream ===\ntick=%d\nkey=%s\nmodel=%s thinking=%s effort=%s max_tokens=%s messages=%d body_bytes=%d\n",
+			TICK, tostr(chat.key), st.model, tostring(st.thinking), st.effort, tostring(st.max_tokens), #chat.messages, #body
+		))
+		pcall(os.MkdirAll, log_dir(), 448)
+		chat.net_parts = {}
+		chat.net_size = 0
+		chat.net_chunks = 0
+		chat.last_net_tick = TICK
+		net_append(chat, string.format(
+			"=== shinny net (nonstream) ===\ntick=%d seq=%d key=%s\nendpoint=%s http=1.1 timeout=1800\nmodel=%s messages=%d body_bytes=%d\n",
+			TICK, chat.req_seq or 0, tostr(chat.key), url, st.model, #chat.messages, #body
+		))
+		net_write(chat)
+	else
+		chat.log_parts = nil
+		chat.log_size = 0
+		chat.net_parts = nil
+		chat.net_size = 0
+	end
+
+	chat.text = render_chat(chat, true)
+	replace_chat_text(chat, chat.text)
+
+	local body_path = chat_dir() .. "/request-" .. PROCESS_TOKEN .. "-" .. tostring(hash_key(chat.key)) .. "-" .. tostring(REQ_SEQ) .. ".json"
+	pcall(os.MkdirAll, chat_dir(), 448)
+	local wrote = pcall(ioutil.WriteFile, body_path, body, 384)
+	if not wrote then
+		chat.streaming = false
+		chat.nonstream = false
+		micro.InfoBar():Error("shinny: 无法写入非流式请求体")
+		replace_chat_text(chat, render_chat(chat, false))
+		return
+	end
+	chat.body_path = body_path
+	os.Setenv("SHINNY_ENDPOINT", url)
+	os.Setenv("SHINNY_KEY", key)
+	os.Setenv("SHINNY_BODY", "")
+	os.Setenv("SHINNY_BODY_FILE", body_path)
+	micro.InfoBar():Message("shinny: 流式卡住，改用非流式重试…")
+
+	local ok, job = pcall(shell.JobStart, NONSTREAM_CMD, nil, nil, function(output)
+		os.Setenv("SHINNY_KEY", "")
+		os.Setenv("SHINNY_BODY", "")
+		if chat.req_seq == req then
+			handle_nonstream_exit(chat, output)
+		end
+	end)
+	if not ok then
+		chat.streaming = false
+		chat.nonstream = false
+		os.Setenv("SHINNY_KEY", "")
+		os.Setenv("SHINNY_BODY", "")
 		chat.messages[#chat.messages + 1] = {
 			role = "assistant",
-			content = partial,
-			display = partial,
-			reasoning_content = chat.stream.reasoning,
-			tool_calls = tools,
+			content = "（非流式重试无法启动）",
+			display = "（非流式重试无法启动）",
 		}
-		for _, call in ipairs(tools) do
-			local name = tostr((call["function"] or {}).name)
-			local result, note = execute_tool(chat, call)
-			chat.messages[#chat.messages + 1] = {
-				role = "tool",
-				tool_call_id = call.id,
-				content = result,
-				display = name .. " · " .. note,
-			}
-		end
-		save_chat(chat)
-		chat.round = (chat.round or 0) + 1
 		replace_chat_text(chat, render_chat(chat, false))
-		if chat.round >= 4 then
-			chat.messages[#chat.messages + 1] = {
-				role = "assistant",
-				content = "（工具调用次数达到上限）",
-				display = "（工具调用次数达到上限）",
-			}
-			save_chat(chat)
-			replace_chat_text(chat, render_chat(chat, false))
-			return
-		end
-		start_request(chat)
+		return
+	end
+	chat.job = job
+end
+
+function handle_nonstream_exit(chat, output)
+	chat.job = nil
+	if chat.body_path ~= nil then
+		pcall(os.Remove, chat.body_path)
+		chat.body_path = nil
+	end
+	if not chat.streaming then
+		return
+	end
+	local rawout = tostr(output)
+	if rawout == "" then
+		rawout = tostr(chat.raw or "")
+	end
+	local idx = rawout:find(STATUS_MARKER, 1, true)
+	local status = tonumber(rawout:match(STATUS_MARKER .. ":(%d+)") or "")
+	local payload = idx and rawout:sub(1, idx - 1) or rawout
+	chat.streaming = false
+	chat.nonstream = false
+
+	if chat.log_parts ~= nil then
+		log_append(chat, string.format(
+			"\n=== nonstream exit ===\nstatus=%s body_bytes=%d\n",
+			tostr(status), #payload
+		))
+		log_append(chat, shorten(payload, 4000))
+		log_append(chat, "\n")
+		log_flush(chat)
+	end
+	if chat.net_parts ~= nil then
+		local meta = rawout:match(NET_MARKER .. ":([^\n\r]+)") or ""
+		net_append(chat, string.format(
+			"[net] nonstream exit tick=%d status=%s bytes=%d meta=%s\n",
+			TICK, tostr(status), #payload, meta ~= "" and meta or "none"
+		))
+		net_flush(chat)
+	end
+
+	if chat.canceled then
+		finalize_cancel(chat)
 		return
 	end
 
-	local content = partial
-	local notes = {}
-	if content ~= "" then
-		local cleaned
-		cleaned, notes = apply_edits(chat, content)
-		content = cleaned
+	if status == nil or status < 200 or status >= 300 then
+		local detail = error_detail(payload)
+		if detail == "" then
+			detail = status ~= nil and ("HTTP " .. tostr(status)) or "非流式响应为空"
+		end
+		chat.messages[#chat.messages + 1] = {
+			role = "assistant",
+			content = "（请求失败：" .. shorten(detail, 300) .. "）",
+			display = "（请求失败：" .. shorten(detail, 300) .. "）",
+		}
+		save_chat(chat)
+		replace_chat_text(chat, render_chat(chat, false))
+		return
 	end
-	if content == "" and (chat.stream.reasoning or "") ~= "" then
-		content = "（只返回了思考内容，没有最终回答）"
+
+	local ok, data = pcall(json_decode, payload)
+	if not ok or type(data) ~= "table" or type(data.choices) ~= "table" or type(data.choices[1]) ~= "table" then
+		local detail = error_detail(payload)
+		if detail == "" then
+			detail = "非流式响应不是合法 JSON"
+		end
+		chat.messages[#chat.messages + 1] = {
+			role = "assistant",
+			content = "（请求失败：" .. shorten(detail, 300) .. "）",
+			display = "（请求失败：" .. shorten(detail, 300) .. "）",
+		}
+		save_chat(chat)
+		replace_chat_text(chat, render_chat(chat, false))
+		return
 	end
-	local display = content
-	if #notes > 0 then
-		display = (display ~= "" and display .. "\n\n" or "") .. "▸ 已应用到文件：" .. table.concat(notes, "；")
+
+	local choice = data.choices[1]
+	local msg = choice.message or {}
+	local content = msg.content
+	if type(content) ~= "string" then
+		content = ""
 	end
-	local warning = nil
-	if chat.stream.finish_reason == "length" then
-		warning = "达到模型输出上限，回答可能不完整"
-	elseif not chat.stream.finished then
-		warning = "连接中断，回答可能不完整"
+	local reasoning = msg.reasoning_content or msg.reasoning or msg.reasoning_text or ""
+	if type(reasoning) ~= "string" then
+		reasoning = ""
 	end
-	if warning ~= nil then
-		display = (display ~= "" and display .. "\n\n" or "") .. "▸ " .. warning
+	local tools = msg.tool_calls or {}
+	if type(tools) ~= "table" then
+		tools = {}
 	end
-	chat.messages[#chat.messages + 1] = {
-		role = "assistant",
+	chat.stream = {
 		content = content,
-		display = display,
-		reasoning_content = chat.stream.reasoning,
+		reasoning = reasoning,
+		tools = tools,
+		usage = data.usage,
+		finished = true,
+		finish_reason = choice.finish_reason,
 	}
-	save_chat(chat)
-	replace_chat_text(chat, render_chat(chat, false))
-	micro.InfoBar():Message("shinny: 完成")
+	complete_turn(chat)
 end
 
 local function send_chat(chat, question)
@@ -2371,6 +2636,7 @@ local function send_chat(chat, question)
 	chat.round = 0
 	chat.retries = 0
 	chat.canceled = false
+	chat.fallback_attempted = false
 	save_chat(chat)
 	start_request(chat)
 	return true
@@ -3486,6 +3752,9 @@ function init()
 	config.RegisterGlobalOption("shinny", "maxtokens", 65536)
 	config.RegisterGlobalOption("shinny", "debug", true)
 	config.RegisterGlobalOption("shinny", "streamtimeout", 120)
+	config.RegisterGlobalOption("shinny", "streamfallback", true)
+	config.RegisterGlobalOption("shinny", "firstbyttimeout", 15)
+	config.RegisterGlobalOption("shinny", "stalltimeout", 45)
 	config.RegisterGlobalOption("shinny", "chattokenbudget", 24000)
 	config.RegisterGlobalOption("shinny", "showthinking", false)
 	config.RegisterGlobalOption("shinny", "imagedetail", "auto")

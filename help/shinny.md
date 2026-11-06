@@ -55,7 +55,7 @@ Chat **每轮自动注入**：
 
 Chat 的行为：
 
-* **流式输出**：回答边生成边显示；收到 `[DONE]` 立即收尾；单次请求最长 30 分钟；60 秒无数据会保留部分内容并结束；`finish_reason=length` 或连接中断会标注“回答可能不完整”；`Esc` 可随时停止
+* **流式输出**：回答边生成边显示；收到 `[DONE]` 立即收尾；单次请求最长 30 分钟；首字/思考阶段静默会先自动改用非流式重试一次（`shinny.streamfallback`），正文中途静默才保留部分内容并结束；`finish_reason=length` 或连接中断会标注“回答可能不完整”；`Esc` 可随时停止
 * **调试日志**：默认记录 `last-stream.log`（带 tick 的原始 SSE）和 `last-network.log`（chunk/等待/gap 事件 + curl HTTP/DNS/TLS/TTFB/耗时/速度指标），用 `> shinny-log` / `> shinny-netlog` 打开；可用 `shinny.debug` 关闭
 * 流式固定 HTTP/1.1，`shinny.streamtimeout` 控制无数据超时（默认 120 秒）；等待时状态栏显示已等待秒数
 * **思考模式**：`reasoning_content` 单独保存，`shinny.showthinking` 打开后显示
@@ -149,7 +149,10 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny.imagemaxmb` | `12` | 单张图片大小上限（MB） |
 | `shinny.maxtokens` | `65536` | 单次回答最大输出 tokens |
 | `shinny.debug` | `true` | 记录流式调试日志 |
-| `shinny.streamtimeout` | `120` | 无数据多少秒后结束请求 |
+| `shinny.streamtimeout` | `120` | 正文中途无数据多少秒后结束 |
+| `shinny.streamfallback` | `true` | 首字/思考静默时自动非流式重试 |
+| `shinny.firstbyttimeout` | `15` | 首字超时（秒） |
+| `shinny.stalltimeout` | `45` | thinking 阶段 chunk 间隔超时（秒） |
 
 
 ## 外观
