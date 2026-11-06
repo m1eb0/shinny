@@ -1,4 +1,4 @@
-VERSION = "0.8.3"
+VERSION = "0.8.4"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -195,7 +195,7 @@ local function open_url(url)
 		opener = "open"
 	end
 	local cmd = opener .. " " .. shell_quote(url)
-	local ok, err = pcall(shell.JobStart, cmd)
+	local ok, err = pcall(shell.JobStart, cmd, nil, nil, function() end)
 	if not ok then
 		micro.InfoBar():Error("shinny: 无法打开浏览器 — " .. shorten(collapse(tostr(err)), 120))
 		return false

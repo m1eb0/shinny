@@ -6,8 +6,8 @@
 		"Tags": ["tavily", "search", "web", "selection"],
 		"Versions": [
 			{
-				"Version": "0.8.3",
-				"Url": "https://github.com/m1eb0/shinny/archive/v0.8.3.zip",
+				"Version": "0.8.4",
+				"Url": "https://github.com/m1eb0/shinny/archive/v0.8.4.zip",
 				"Require": {
 					"micro": ">=2.0.0"
 				}
