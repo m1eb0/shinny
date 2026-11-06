@@ -1,4 +1,4 @@
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -1979,6 +1979,17 @@ local function chat_key()
 	return trim(tostr(option("deepseekkey", "")))
 end
 
+local function free_fallback_model(current)
+	local raw = tostr(option("freefallback", "kilo-auto/free,nvidia/nemotron-3.5-super-vl:free"))
+	for item in raw:gmatch("[^,]+") do
+		local id = trim(item)
+		if id ~= "" and id ~= current then
+			return id
+		end
+	end
+	return nil
+end
+
 local function chat_credentials()
 	local settings = chat_settings()
 	if settings.provider == "free" then
@@ -2561,6 +2572,17 @@ function handle_stream_exit(chat, output)
 	end
 
 	if (status == nil or status < 200 or status >= 300) and partial == "" and #tools == 0 and (chat.stream.reasoning or "") == "" then
+		local settings = chat_settings()
+		if (status == 429 or status == 502) and settings.provider == "free" and not chat.fallback_done then
+			local fallback = free_fallback_model(settings.model)
+			if fallback ~= nil then
+				chat.fallback_done = true
+				set_setting("freemodel", fallback, "freemodel")
+				micro.InfoBar():Message("shinny: HTTP " .. tostr(status) .. "，切到 " .. fallback .. " 重试")
+				start_request(chat)
+				return
+			end
+		end
 		local detail = error_detail(chat.raw or "")
 		if detail == "" then
 			detail = status ~= nil and ("HTTP " .. tostr(status)) or "流式响应为空"
@@ -2682,6 +2704,7 @@ local function send_chat(chat, question)
 	chat.round = 0
 	chat.retries = 0
 	chat.canceled = false
+	chat.fallback_done = false
 	save_chat(chat)
 	start_request(chat)
 	return true
@@ -3878,6 +3901,7 @@ function init()
 	config.RegisterGlobalOption("shinny", "freeurl", "")
 	config.RegisterGlobalOption("shinny", "freekekey", "")
 	config.RegisterGlobalOption("shinny", "freemaxtokens", DEFAULT_FREE_MAX)
+	config.RegisterGlobalOption("shinny", "freefallback", "kilo-auto/free,nvidia/nemotron-3.5-super-vl:free")
 	config.RegisterGlobalOption("shinny", "thinking", true)
 	config.RegisterGlobalOption("shinny", "effort", DEFAULT_EFFORT)
 	config.RegisterGlobalOption("shinny", "maxtokens", 65536)

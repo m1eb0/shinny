@@ -168,7 +168,7 @@ OUR_FREE_MODEL_FREE_TRANSPORT=node node packages/standalone/cli.mjs --port 18900
 
 `shinny.chatprovider`、`shinny.freemodel` 会持久化。免费模型使用网关自己的 `reasoning_effort` 档位：shinny 的 `low/high/max` 会映射到模型的 `light/balanced/deep`（或 `low/medium/high`），关闭 thinking 时优先发 `disabled`；具体可用档位见 `shinny-models`。请求不带 DeepSeek 的 `thinking` 字段。
 
-免费池的可用性取决于出口和上游配额，`/v1/models` 里同一批模型可能个别返回 429；换一个模型即可。
+免费池的可用性取决于出口和上游配额，`/v1/models` 里同一批模型可能个别返回 429。免费 provider 收到 429/502 时会自动切到 `shinny.freefallback` 链里的下一个模型重试一次（默认 `kilo-auto/free,nvidia/nemotron-3.5-super-vl:free`），并更新当前模型；也可以手动 `> shinny-model next`。
 
 ## 命令与选项
 
@@ -207,6 +207,7 @@ OUR_FREE_MODEL_FREE_TRANSPORT=node node packages/standalone/cli.mjs --port 18900
 | `shinny.freeurl` | `""`（自动发现） |
 | `shinny.freekekey` | `""`（自动发现） |
 | `shinny.freemaxtokens` | `32768` |
+| `shinny.freefallback` | `kilo-auto/free,nvidia/nemotron-3.5-super-vl:free` |
 | `shinny.thinking` / `shinny.effort` | `true` / `high` |
 | `shinny.chattokenbudget` | `24000` |
 | `shinny.showthinking` | `false` |
