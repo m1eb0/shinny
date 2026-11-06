@@ -234,7 +234,7 @@ chat 分屏、输入栏、搜索结果 tab 和帮助页都带语法高亮（角�
 ## 开发
 
 ```sh
-make test    # 37 个 headless 测试 + 2 个走本地 mock 的端到端测试
+make test    # 36 个 headless 测试 + 2 个走本地 mock 的端到端测试
 ```
 
 `tests/run.lua` 用假的 micro API 跑逻辑；`tests/integration.sh` 启动
