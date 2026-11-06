@@ -1,4 +1,4 @@
-VERSION = "0.9.0"
+VERSION = "0.8.0"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -18,9 +18,6 @@ local DEFAULT_ENDPOINT = "https://api.tavily.com/search"
 local DEFAULT_DS_SEARCH = "https://api.deepseek.com/v1/tools/search"
 local DEFAULT_DS_CHAT = "https://api.deepseek.com/chat/completions"
 local DEFAULT_MODEL = "deepseek-flash"
-local DEFAULT_FREE_URL = "http://127.0.0.1:18900/v1"
-local DEFAULT_FREE_MODEL = "kilo-auto/free"
-local DEFAULT_FREE_MAX = 32768
 local DEFAULT_EFFORT = "high"
 local DEFAULT_DEPTH = "basic"
 local DEFAULT_PREFIX = "什么是"
@@ -41,8 +38,6 @@ local runtime = {
 	suffix = "",
 	backend = "tavily",
 	model = DEFAULT_MODEL,
-	provider = "deepseek",
-	freemodel = DEFAULT_FREE_MODEL,
 	thinking = true,
 	effort = DEFAULT_EFFORT,
 	loaded = false,
@@ -481,24 +476,16 @@ local function load_state()
 	if type(obj.effort) == "string" and obj.effort ~= "" then
 		runtime.effort = obj.effort
 	end
-	if type(obj.provider) == "string" and obj.provider ~= "" then
-		runtime.provider = obj.provider
-	end
-	if type(obj.freemodel) == "string" and obj.freemodel ~= "" then
-		runtime.freemodel = obj.freemodel
-	end
 	runtime.loaded = true
 end
 
 local function save_state()
 	local text = string.format(
-		'{\n    "prefix": "%s",\n    "suffix": "%s",\n    "backend": "%s",\n    "model": "%s",\n    "provider": "%s",\n    "freemodel": "%s",\n    "thinking": %s,\n    "effort": "%s"\n}\n',
+		'{\n    "prefix": "%s",\n    "suffix": "%s",\n    "backend": "%s",\n    "model": "%s",\n    "thinking": %s,\n    "effort": "%s"\n}\n',
 		json_escape(runtime.prefix),
 		json_escape(runtime.suffix),
 		json_escape(runtime.backend),
 		json_escape(runtime.model),
-		json_escape(runtime.provider),
-		json_escape(runtime.freemodel),
 		tostr(runtime.thinking),
 		json_escape(runtime.effort)
 	)
@@ -518,8 +505,6 @@ local function apply_state()
 	pcall(config.SetGlobalOption, "shinny.chatmodel", runtime.model)
 	pcall(config.SetGlobalOption, "shinny.thinking", tostr(runtime.thinking))
 	pcall(config.SetGlobalOption, "shinny.effort", runtime.effort)
-	pcall(config.SetGlobalOption, "shinny.chatprovider", runtime.provider)
-	pcall(config.SetGlobalOption, "shinny.freemodel", runtime.freemodel)
 end
 
 local function set_setting(name, value, option_name)
@@ -1176,123 +1161,6 @@ end
 
 local chat_settings
 
-local FREE_MODELS = {}
-local FREE_ORDER = {}
-
-local function read_json_file(path)
-	local ok, data = pcall(ioutil.ReadFile, path)
-	if not ok or data == nil then
-		return nil
-	end
-	local text = ""
-	pcall(function()
-		text = fmt.Sprintf("%s", data)
-	end)
-	local ok2, obj = pcall(json_decode, text)
-	if not ok2 or type(obj) ~= "table" then
-		return nil
-	end
-	return obj
-end
-
-local function free_config()
-	local url = trim(tostr(option("freeurl", "")))
-	local key = trim(tostr(option("freekekey", "")))
-	if url ~= "" and key ~= "" then
-		return url:gsub("/+$", ""), key
-	end
-
-	local home = tostr(os.Getenv("HOME"))
-	local dsh = tostr(os.Getenv("DSH_HOME"))
-	local candidates = {}
-	candidates[#candidates + 1] = home .. "/.our-free-model/settings.json"
-	if dsh ~= "" then
-		candidates[#candidates + 1] = dsh .. "/our-free-model/settings.json"
-	end
-	candidates[#candidates + 1] = home .. "/.dsh/our-free-model/settings.json"
-
-	for _, path in ipairs(candidates) do
-		local obj = read_json_file(path)
-		if obj ~= nil and type(obj.forwardKey) == "string" and obj.forwardKey ~= "" then
-			local found_key = obj.forwardKey
-			local found_url = ""
-			if obj.standalonePort ~= nil then
-				found_url = "http://127.0.0.1:" .. tostring(obj.standalonePort) .. "/v1"
-			elseif type(obj.forward) == "table" and obj.forward.enabled == true then
-				found_url = "http://" .. tostr(obj.forward.host or "127.0.0.1") .. ":" .. tostring(obj.forward.port or 18899) .. "/v1"
-			end
-			if found_url ~= "" then
-				if url == "" then
-					url = found_url
-				end
-				if key == "" then
-					key = found_key
-				end
-				if url ~= "" and key ~= "" then
-					break
-				end
-			end
-		end
-	end
-
-	if url == "" then
-		url = DEFAULT_FREE_URL
-	end
-	return url:gsub("/+$", ""), key
-end
-
-local function free_model_info(id)
-	return FREE_MODELS[tostr(id)]
-end
-
-local function map_free_effort(settings, info)
-	local efforts = info and info.efforts or nil
-	local function has(v)
-		if type(efforts) ~= "table" then
-			return false
-		end
-		for _, e in ipairs(efforts) do
-			if e == v then
-				return true
-			end
-		end
-		return false
-	end
-
-	if not settings.thinking then
-		if has("disabled") then
-			return "disabled"
-		elseif has("off") then
-			return "off"
-		elseif has("none") then
-			return "none"
-		end
-		if type(efforts) == "table" and #efforts > 0 then
-			return efforts[1]
-		end
-		return "disabled"
-	end
-
-	local target = settings.effort
-	if has(target) then
-		return target
-	end
-	local mappings = {
-		low = { "low", "light", "minimal" },
-		high = { "high", "balanced", "medium" },
-		max = { "max", "deep", "xhigh" },
-	}
-	for _, candidate in ipairs(mappings[target] or {}) do
-		if has(candidate) then
-			return candidate
-		end
-	end
-	if info and type(info.default_effort) == "string" and info.default_effort ~= "" then
-		return info.default_effort
-	end
-	return target
-end
-
 local function normalize_effort(value)
 	value = trim(tostr(value)):lower()
 	if value == "minimal" then
@@ -1307,31 +1175,15 @@ local function normalize_effort(value)
 end
 
 function chat_settings()
-	local provider = trim(tostr(option("chatprovider", "deepseek"))):lower()
-	if provider ~= "free" then
-		provider = "deepseek"
-	end
-	local model
-	local max_tokens
-	if provider == "free" then
-		model = trim(tostr(option("freemodel", DEFAULT_FREE_MODEL)))
-		if model == "" then
-			model = DEFAULT_FREE_MODEL
-		end
-		max_tokens = math.floor(option_number("freemaxtokens", DEFAULT_FREE_MAX))
-	else
-		model = trim(tostr(option("chatmodel", DEFAULT_MODEL)))
-		if model == "" then
-			model = DEFAULT_MODEL
-		end
-		max_tokens = math.floor(option_number("maxtokens", 65536))
+	local model = trim(tostr(option("chatmodel", DEFAULT_MODEL)))
+	if model == "" then
+		model = DEFAULT_MODEL
 	end
 	return {
-		provider = provider,
 		model = model,
 		thinking = option_bool("thinking", true),
 		effort = normalize_effort(option("effort", DEFAULT_EFFORT)),
-		max_tokens = max_tokens,
+		max_tokens = math.floor(option_number("maxtokens", 65536)),
 	}
 end
 
@@ -1836,12 +1688,7 @@ local function build_request(chat)
 	if settings.max_tokens ~= nil and settings.max_tokens > 0 then
 		parts[#parts + 1] = '"max_tokens":' .. tostring(math.floor(settings.max_tokens))
 	end
-	if settings.provider == "free" then
-		local effort = map_free_effort(settings, free_model_info(settings.model))
-		if effort ~= nil and effort ~= "" then
-			parts[#parts + 1] = '"reasoning_effort":"' .. json_escape(effort) .. '"'
-		end
-	elseif settings.thinking then
+	if settings.thinking then
 		parts[#parts + 1] = '"thinking":{"type":"enabled"}'
 		parts[#parts + 1] = '"reasoning_effort":"' .. json_escape(settings.effort) .. '"'
 	else
@@ -1857,17 +1704,8 @@ local function merge_usage(chat, usage)
 	local u = chat.usage or {}
 	u.prompt = (u.prompt or 0) + (tonumber(usage.prompt_tokens) or 0)
 	u.completion = (u.completion or 0) + (tonumber(usage.completion_tokens) or 0)
-	local hit = tonumber(usage.prompt_cache_hit_tokens)
-	if hit == nil and type(usage.prompt_tokens_details) == "table" then
-		hit = tonumber(usage.prompt_tokens_details.cached_tokens)
-	end
-	local prompt = tonumber(usage.prompt_tokens) or 0
-	local miss = tonumber(usage.prompt_cache_miss_tokens)
-	if miss == nil and hit ~= nil and prompt > 0 then
-		miss = math.max(0, prompt - hit)
-	end
-	u.hit = (u.hit or 0) + (hit or 0)
-	u.miss = (u.miss or 0) + (miss or 0)
+	u.hit = (u.hit or 0) + (tonumber(usage.prompt_cache_hit_tokens) or 0)
+	u.miss = (u.miss or 0) + (tonumber(usage.prompt_cache_miss_tokens) or 0)
 	local details = usage.completion_tokens_details
 	if type(details) == "table" then
 		u.reasoning = (u.reasoning or 0) + (tonumber(details.reasoning_tokens) or 0)
@@ -1904,11 +1742,7 @@ function render_chat(chat, streaming)
 	add(" shinny chat")
 	local nfiles = #open_buffers()
 	add(" " .. chat.label .. " · " .. (nfiles == 1 and "1 file" or (nfiles .. " files")))
-	if settings.provider == "free" then
-		add(" free · " .. settings.model .. " · " .. thinking_label)
-	else
-		add(" " .. settings.model .. " · " .. thinking_label)
-	end
+	add(" " .. settings.model .. " · " .. thinking_label)
 	local usage = usage_line(chat)
 	if usage ~= nil then
 		add(" tokens " .. usage)
@@ -1977,137 +1811,6 @@ local function chat_key()
 		return env
 	end
 	return trim(tostr(option("deepseekkey", "")))
-end
-
-local function chat_credentials()
-	local settings = chat_settings()
-	if settings.provider == "free" then
-		local url, key = free_config()
-		return key, url .. "/chat/completions"
-	end
-	local key = chat_key()
-	local url = trim(tostr(option("chaturl", DEFAULT_DS_CHAT)))
-	if url == "" then
-		url = DEFAULT_DS_CHAT
-	end
-	return key, url
-end
-
-local function open_readonly_tab(bp, name, text, ft)
-	if bp == nil then
-		return
-	end
-	local buf = nil
-	local ok = pcall(function()
-		bp:AddTab()
-	end)
-	if ok then
-		local tabs = micro.Tabs()
-		local tab = tabs.List[#tabs.List]
-		local pane = tab and tab.Panes[1]
-		if pane ~= nil then
-			buf = pane.Buf
-			pcall(function()
-				buf:SetName(name)
-			end)
-		end
-	end
-	if buf == nil then
-		buf = buffer.NewBuffer("", "")
-		buf:SetName(name)
-		bp:VSplitIndex(buf, true)
-	end
-	local old = buffer_text(buf)
-	if #old > 0 then
-		local n = 0
-		pcall(function()
-			n = buf:LinesNum()
-		end)
-		local last = ""
-		pcall(function()
-			last = tostr(buf:Line(n - 1))
-		end)
-		pcall(function()
-			buf:Remove(buffer.Loc(0, 0), buffer.Loc(#last, n - 1))
-		end)
-	end
-	buf:Insert(buffer.Loc(0, 0), text)
-	set_filetype(buf, ft or "log", true)
-	pcall(function()
-		buf:SetOption("readonly", true)
-	end)
-end
-
-local function render_free_models(bp, url)
-	local lines = { "# Our Free Model", "", "endpoint: " .. url, "" }
-	for _, id in ipairs(FREE_ORDER) do
-		local m = FREE_MODELS[id]
-		local efforts = table.concat(m.efforts or {}, " / ")
-		lines[#lines + 1] = "- `" .. id .. "`"
-		lines[#lines + 1] = string.format("  ctx %s · efforts %s · default %s",
-			tostr(m.context or "?"), efforts ~= "" and efforts or "?", tostr(m.default_effort or "?"))
-	end
-	lines[#lines + 1] = ""
-	lines[#lines + 1] = "用 `> shinny-model <id>` 切换；`> shinny-models` 刷新。"
-	open_readonly_tab(bp, "shinny free models", table.concat(lines, "\n"), "markdown")
-end
-
-local function fetch_free_models(bp, open_after)
-	local url, key = free_config()
-	if key == "" then
-		micro.InfoBar():Error("shinny: 没有免费网关 key（确认本地服务已启动或设置 shinny.freekekey）")
-		return
-	end
-	local endpoint = url .. "/models"
-	os.Setenv("SHINNY_FREE_URL", endpoint)
-	os.Setenv("SHINNY_FREE_KEY", key)
-	local cmd = 'curl -sS --max-time 20 -H "Authorization: Bearer $SHINNY_FREE_KEY" "$SHINNY_FREE_URL"'
-		.. ' -w "\\n' .. STATUS_MARKER .. ':%{http_code}"'
-	local ok, job = pcall(shell.JobStart, cmd, nil, nil, function(output)
-		os.Setenv("SHINNY_FREE_KEY", "")
-		output = tostr(output)
-		local idx = output:find(STATUS_MARKER, 1, true)
-		local status = tonumber(output:match(STATUS_MARKER .. ":(%d+)") or "")
-		local payload = idx and output:sub(1, idx - 1) or output
-		if status == nil or status < 200 or status >= 300 then
-			micro.InfoBar():Error("shinny: 模型清单失败 HTTP " .. tostr(status or "?"))
-			return
-		end
-		local ok2, data = pcall(json_decode, payload)
-		if not ok2 or type(data) ~= "table" or type(data.data) ~= "table" then
-			micro.InfoBar():Error("shinny: 模型清单不是合法 JSON")
-			return
-		end
-		FREE_MODELS = {}
-		FREE_ORDER = {}
-		for _, m in ipairs(data.data) do
-			local id = tostr(m.id or "")
-			if id ~= "" then
-				local efforts = {}
-				if type(m.x_ofm_efforts) == "table" then
-					for _, e in ipairs(m.x_ofm_efforts) do
-						efforts[#efforts + 1] = tostr(e)
-					end
-				end
-				FREE_MODELS[id] = {
-					id = id,
-					context = m.context_window,
-					efforts = efforts,
-					default_effort = m.x_ofm_effort_default,
-				}
-				FREE_ORDER[#FREE_ORDER + 1] = id
-			end
-		end
-		table.sort(FREE_ORDER)
-		if open_after then
-			render_free_models(bp, url)
-		end
-		micro.InfoBar():Message("shinny: 免费模型 " .. tostring(#FREE_ORDER) .. " 个")
-	end)
-	if not ok then
-		os.Setenv("SHINNY_FREE_KEY", "")
-		micro.InfoBar():Error("shinny: 无法请求模型清单")
-	end
 end
 
 local function tool_text(text)
@@ -2228,18 +1931,17 @@ local function accumulate_tool_calls(chat, list)
 end
 
 function start_request(chat)
-	local key, url = chat_credentials()
+	local key = chat_key()
 	if key == "" then
 		chat.streaming = false
-		local settings = chat_settings()
-		if settings.provider == "free" then
-			micro.InfoBar():Error("shinny: 免费模型网关没有 key — 确认本地服务已启动，或设置 shinny.freekekey")
-		else
-			micro.InfoBar():Error("shinny: 没有 DeepSeek key — 运行 > set shinny.deepseekkey <key>")
-		end
+		micro.InfoBar():Error("shinny: 没有 DeepSeek key — 运行 > set shinny.deepseekkey <key>")
 		return
 	end
 	local body = build_request(chat)
+	local url = trim(tostr(option("chaturl", DEFAULT_DS_CHAT)))
+	if url == "" then
+		url = DEFAULT_DS_CHAT
+	end
 
 	chat.stream = { content = "", reasoning = "", tools = {}, usage = nil, finished = false }
 	chat.streaming = true
@@ -2382,16 +2084,8 @@ function handle_stream_chunk(chat, chunk)
 						end
 						local delta = choices[1].delta
 						if type(delta) == "table" then
-							local reasoning_delta = nil
 							if type(delta.reasoning_content) == "string" and delta.reasoning_content ~= "" then
-								reasoning_delta = delta.reasoning_content
-							elseif type(delta.reasoning) == "string" and delta.reasoning ~= "" then
-								reasoning_delta = delta.reasoning
-							elseif type(delta.reasoning_text) == "string" and delta.reasoning_text ~= "" then
-								reasoning_delta = delta.reasoning_text
-							end
-							if reasoning_delta ~= nil then
-								chat.stream.reasoning = chat.stream.reasoning .. reasoning_delta
+								chat.stream.reasoning = chat.stream.reasoning .. delta.reasoning_content
 								local bucket = math.floor(#chat.stream.reasoning / 200)
 								if bucket ~= chat.think_bucket then
 									chat.think_bucket = bucket
@@ -2652,14 +2346,9 @@ local function send_chat(chat, question)
 		micro.InfoBar():Error("shinny: 上一个问题还在处理中")
 		return false
 	end
-	local key = chat_credentials()
+	local key = chat_key()
 	if key == "" then
-		local settings = chat_settings()
-		if settings.provider == "free" then
-			micro.InfoBar():Error("shinny: 免费模型网关没有 key — 确认本地服务已启动，或设置 shinny.freekekey")
-		else
-			micro.InfoBar():Error("shinny: 没有 DeepSeek key — 运行 > set shinny.deepseekkey <key>")
-		end
+		micro.InfoBar():Error("shinny: 没有 DeepSeek key — 运行 > set shinny.deepseekkey <key>")
 		return false
 	end
 
@@ -3146,12 +2835,7 @@ local function render_help()
 	add("- 前缀：`" .. (prefix == "" and "无" or prefix) .. "`")
 	add("- 后缀：`" .. (suffix == "" and "无" or suffix) .. "`")
 	add("- 搜索后端：`" .. current_backend() .. "`")
-	add("- Chat 提供方：`" .. settings.provider .. "`")
 	add("- Chat 模型：`" .. settings.model .. "`")
-	if settings.provider == "free" then
-		local free_url, free_key = free_config()
-		add("- 免费网关：`" .. free_url .. "` · key " .. (free_key ~= "" and "已配置" or "未配置"))
-	end
 	add("- 思考模式：`" .. (settings.thinking and ("on · " .. settings.effort) or "off") .. "`")
 	add("- Tavily key：" .. (api_key("tavily") ~= "" and "已配置" or "未配置"))
 	add("- DeepSeek key：" .. (api_key("deepseek") ~= "" and "已配置" or "未配置"))
@@ -3164,7 +2848,7 @@ local function render_help()
 	add("")
 	add("`shinny.prefix`、`shinny.suffix`、`shinny.backend`、`shinny.apikey`、")
 	add("`shinny.deepseekkey`、`shinny.chatmodel`、`shinny.thinking`、`shinny.effort`、")
-	add("`shinny.maxresults`、`shinny.chattokenbudget`、`shinny.showthinking`、`shinny.imagedetail`、`shinny.imagemaxmb`、`shinny.maxtokens`、`shinny.debug`、`shinny.chatprovider`、`shinny.freemodel`、`shinny.freeurl`、`shinny.freekekey`、`shinny.freemaxtokens`")
+	add("`shinny.maxresults`、`shinny.chattokenbudget`、`shinny.showthinking`、`shinny.imagedetail`、`shinny.imagemaxmb`、`shinny.maxtokens`、`shinny.debug`")
 	add("")
 	add("完整文档：`> help shinny`")
 	return table.concat(lines, "\n") .. "\n"
@@ -3249,91 +2933,15 @@ function shinny_backend(bp, args)
 	micro.InfoBar():Message("shinny: backend = " .. value)
 end
 
-function shinny_provider(bp, args)
-	local value = trim(join_args(args)):lower()
-	if value == "" then
-		local st = chat_settings()
-		micro.InfoBar():Message("shinny: provider = " .. st.provider .. " · model = " .. st.model)
-		return
-	end
-	if value ~= "deepseek" and value ~= "free" then
-		micro.InfoBar():Error("shinny: provider 只能是 deepseek 或 free")
-		return
-	end
-	if value == "free" then
-		local _, key = free_config()
-		if key == "" then
-			micro.InfoBar():Error("shinny: 没有免费网关 key — 启动本地服务或设置 shinny.freekekey")
-			return
-		end
-	end
-	set_setting("provider", value)
-	if value == "free" then
-		fetch_free_models(bp, false)
-	end
-	micro.InfoBar():Message("shinny: provider = " .. value)
-end
-
-function shinny_models(bp, args)
-	local st = chat_settings()
-	if st.provider ~= "free" then
-		micro.InfoBar():Error("shinny: 先运行 > shinny-provider free")
-		return
-	end
-	if #FREE_ORDER == 0 then
-		fetch_free_models(bp, true)
-		micro.InfoBar():Message("shinny: 正在获取免费模型清单…")
-		return
-	end
-	local url = select(1, free_config())
-	render_free_models(bp, url)
-end
-
 function shinny_model(bp, args)
 	local value = trim(join_args(args))
-	local st = chat_settings()
 	if value == "" then
-		micro.InfoBar():Message("shinny: model = " .. st.model .. "（" .. st.provider .. "）")
-		return
-	end
-	if value == "list" or value == "ls" then
-		shinny_models(bp, nil)
-		return
-	end
-	if st.provider == "free" then
-		if value == "next" or value == "prev" then
-			if #FREE_ORDER == 0 then
-				micro.InfoBar():Error("shinny: 先运行 > shinny-models 获取清单")
-				return
-			end
-			local idx = 1
-			for i, id in ipairs(FREE_ORDER) do
-				if id == st.model then
-					idx = i
-					break
-				end
-			end
-			if value == "next" then
-				idx = idx % #FREE_ORDER + 1
-			else
-				idx = (idx - 2) % #FREE_ORDER + 1
-			end
-			value = FREE_ORDER[idx]
-		end
-		if #FREE_ORDER > 0 and FREE_MODELS[value] == nil then
-			micro.InfoBar():Error("shinny: 未知免费模型 " .. value .. "（> shinny-models 查看）")
-			return
-		end
-		set_setting("freemodel", value, "freemodel")
-		local info = FREE_MODELS[value]
-		local efforts = info and table.concat(info.efforts or {}, " / ") or ""
-		micro.InfoBar():Message("shinny: free model = " .. value .. (efforts ~= "" and (" · " .. efforts) or ""))
+		micro.InfoBar():Message("shinny: model = " .. chat_settings().model .. "（deepseek-flash | deepseek-v4-pro）")
 		return
 	end
 	set_setting("model", value, "chatmodel")
 	micro.InfoBar():Message("shinny: model = " .. value)
 end
-
 
 function shinny_thinking(bp, args)
 	local value = trim(join_args(args)):lower()
@@ -3873,11 +3481,6 @@ function init()
 	config.RegisterGlobalOption("shinny", "deepseektoolsurl", DEFAULT_DS_SEARCH)
 	config.RegisterGlobalOption("shinny", "chaturl", DEFAULT_DS_CHAT)
 	config.RegisterGlobalOption("shinny", "chatmodel", DEFAULT_MODEL)
-	config.RegisterGlobalOption("shinny", "chatprovider", "deepseek")
-	config.RegisterGlobalOption("shinny", "freemodel", DEFAULT_FREE_MODEL)
-	config.RegisterGlobalOption("shinny", "freeurl", "")
-	config.RegisterGlobalOption("shinny", "freekekey", "")
-	config.RegisterGlobalOption("shinny", "freemaxtokens", DEFAULT_FREE_MAX)
 	config.RegisterGlobalOption("shinny", "thinking", true)
 	config.RegisterGlobalOption("shinny", "effort", DEFAULT_EFFORT)
 	config.RegisterGlobalOption("shinny", "maxtokens", 65536)
@@ -3909,8 +3512,6 @@ function init()
 	config.MakeCommand("shinny-log", shinny_log, config.NoComplete)
 	config.MakeCommand("shinny-netlog", shinny_netlog, config.NoComplete)
 	config.MakeCommand("shinny-model", shinny_model, config.NoComplete)
-	config.MakeCommand("shinny-provider", shinny_provider, config.NoComplete)
-	config.MakeCommand("shinny-models", shinny_models, config.NoComplete)
 	config.MakeCommand("shinny-thinking", shinny_thinking, config.NoComplete)
 	config.MakeCommand("shinny-effort", shinny_effort, config.NoComplete)
 	config.AddRuntimeFile("shinny", config.RTHelp, "help/shinny.md")

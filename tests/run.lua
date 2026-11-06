@@ -1100,30 +1100,6 @@ test("network log records chunk and exit events", function()
 	assert_contains(net, "[net] exit")
 end)
 
-test("free provider sends model, budget and mapped effort", function()
-	local bp = setup_search("tavily")
-	state.options["shinny.chatprovider"] = "free"
-	state.options["shinny.freeurl"] = "http://127.0.0.1:9999/v1"
-	state.options["shinny.freekekey"] = "free-key"
-	state.options["shinny.freemodel"] = "kilo-auto/free"
-	state.options["shinny.freemaxtokens"] = 32768
-	state.options["shinny.thinking"] = true
-	state.options["shinny.effort"] = "high"
-	state.chat_sse = CHAT_TEXT
-	run(shinny_chat, bp, nil)
-	ask("free hello")
-
-	assert_contains(state.job_env.BODY, '"model":"kilo-auto/free"')
-	assert_contains(state.job_env.BODY, '"max_tokens":32768')
-	assert_contains(state.job_env.BODY, '"reasoning_effort":"high"')
-	assert_true(not state.job_env.BODY:find('"thinking"', 1, true), "free request sent thinking field")
-	assert_contains(transcript_pane().Buf:text(), "free · kilo-auto/free")
-
-	state.options["shinny.chatprovider"] = "deepseek"
-	state.options["shinny.thinking"] = true
-	state.options["shinny.effort"] = "high"
-end)
-
 test("chat persists the conversation to disk", function()
 	local bp = setup_search("tavily")
 	state.chat_sse = CHAT_TEXT
