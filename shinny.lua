@@ -1,4 +1,4 @@
-VERSION = "0.8.1"
+VERSION = "0.8.2"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -15,6 +15,16 @@ local ioutil = import("io/ioutil")
 local fmt = import("fmt")
 
 local DEFAULT_ENDPOINT = "https://api.tavily.com/search"
+local DEFAULT_RESEARCH_URL = "https://api.tavily.com/research"
+local DEFAULT_SEARCH_MODE = "simple"
+local SEARCH_MODES = {
+	quick = { label = "快速搜索", kind = "search", depth = "fast", answer = false, cost = "1 credit" },
+	ultra = { label = "极速搜索", kind = "search", depth = "ultra-fast", answer = false, cost = "1 credit" },
+	simple = { label = "简单搜索", kind = "search", depth = "basic", answer = true, cost = "1 credit" },
+	deep = { label = "深度搜索", kind = "search", depth = "advanced", answer = true, cost = "2 credits" },
+	["research-mini"] = { label = "研究 mini", kind = "research", model = "mini", cost = "4–110 credits" },
+	["research-pro"] = { label = "研究 pro", kind = "research", model = "pro", cost = "15–250 credits" },
+}
 local DEFAULT_DS_SEARCH = "https://api.deepseek.com/v1/tools/search"
 local DEFAULT_DS_CHAT = "https://api.deepseek.com/chat/completions"
 local DEFAULT_MODEL = "deepseek-flash"
@@ -40,6 +50,7 @@ local runtime = {
 	model = DEFAULT_MODEL,
 	thinking = true,
 	effort = DEFAULT_EFFORT,
+	searchmode = DEFAULT_SEARCH_MODE,
 	loaded = false,
 }
 
@@ -481,11 +492,12 @@ end
 
 local function save_state()
 	local text = string.format(
-		'{\n    "prefix": "%s",\n    "suffix": "%s",\n    "backend": "%s",\n    "model": "%s",\n    "thinking": %s,\n    "effort": "%s"\n}\n',
+		'{\n    "prefix": "%s",\n    "suffix": "%s",\n    "backend": "%s",\n    "model": "%s",\n    "searchmode": "%s",\n    "thinking": %s,\n    "effort": "%s"\n}\n',
 		json_escape(runtime.prefix),
 		json_escape(runtime.suffix),
 		json_escape(runtime.backend),
 		json_escape(runtime.model),
+		json_escape(runtime.searchmode),
 		tostr(runtime.thinking),
 		json_escape(runtime.effort)
 	)
@@ -505,6 +517,7 @@ local function apply_state()
 	pcall(config.SetGlobalOption, "shinny.chatmodel", runtime.model)
 	pcall(config.SetGlobalOption, "shinny.thinking", tostr(runtime.thinking))
 	pcall(config.SetGlobalOption, "shinny.effort", runtime.effort)
+	pcall(config.SetGlobalOption, "shinny.searchmode", runtime.searchmode)
 end
 
 local function set_setting(name, value, option_name)
@@ -524,6 +537,13 @@ local function curl_cmd(timeout)
 		.. ' --data-binary "$SHINNY_BODY"'
 		.. ' -w "\\n' .. STATUS_MARKER .. ':%{http_code}"'
 end
+
+local RESEARCH_CMD = 'curl -sS -N --http1.1 --keepalive-time 30 --max-time 1800 -X POST "$SHINNY_ENDPOINT"'
+	.. ' -H "Content-Type: application/json"'
+	.. ' -H "Accept: text/event-stream"'
+	.. ' -H "Authorization: Bearer $SHINNY_KEY"'
+	.. ' --data-binary "$SHINNY_BODY"'
+	.. ' -w "\\n' .. STATUS_MARKER .. ':%{http_code}"'
 
 local function split_output(output)
 	output = tostr(output)
@@ -724,21 +744,31 @@ local function api_key(backend_name)
 	return trim(tostr(option("apikey", "")))
 end
 
-local function search_options()
-	local depth = trim(tostr(option("depth", DEFAULT_DEPTH)))
-	if depth ~= "basic" and depth ~= "advanced" then
-		depth = DEFAULT_DEPTH
+local function current_search_mode()
+	local mode = trim(tostr(option("searchmode", DEFAULT_SEARCH_MODE)))
+	if SEARCH_MODES[mode] == nil then
+		mode = DEFAULT_SEARCH_MODE
 	end
+	return mode, SEARCH_MODES[mode]
+end
+
+local function search_options()
 	local max_results = math.floor(option_number("maxresults", 5))
 	if max_results < 1 then
 		max_results = 1
 	elseif max_results > 20 then
 		max_results = 20
 	end
+	local mode, info = current_search_mode()
 	return {
 		max_results = max_results,
-		depth = depth,
-		include_answer = option_bool("includeanswer", true),
+		mode = mode,
+		label = info.label,
+		kind = info.kind,
+		depth = info.depth or "basic",
+		include_answer = info.answer == true,
+		cost = info.cost,
+		research_model = info.model,
 	}
 end
 
@@ -828,7 +858,7 @@ local function render_search(ctx, data)
 	local results = extract_results(ctx.backend, data)
 	local meta = string.format("%s · %d result(s)", ctx.backend, #results)
 	if ctx.backend == "tavily" then
-		meta = meta .. " · " .. ctx.opts.depth
+		meta = meta .. " · " .. ctx.opts.depth .. " · " .. (ctx.opts.label or ctx.opts.mode) .. " · " .. (ctx.opts.cost or "?")
 	end
 	if type(data.response_time) == "number" then
 		meta = meta .. string.format(" · %.2fs", data.response_time)
@@ -921,7 +951,10 @@ local function fill_results_buffer(buf, text)
 	set_filetype(buf, "shinnyresults", true)
 end
 
-local function show_results(ctx, text)
+local function show_results(ctx, text, focus)
+	if focus == nil then
+		focus = true
+	end
 	local bp = micro.CurPane()
 	if bp == nil then
 		micro.InfoBar():Error("shinny: no pane to show the results in")
@@ -931,10 +964,12 @@ local function show_results(ctx, text)
 	local tabs, idx, buf = find_tab_with_buffer(SEARCH_TAB_NAME)
 	if buf ~= nil then
 		fill_results_buffer(buf, text)
-		pcall(function()
-			tabs:SetActive(idx - 1)
-		end)
-		micro.InfoBar():Message("shinny: 搜索结果已更新")
+		if focus then
+			pcall(function()
+				tabs:SetActive(idx - 1)
+			end)
+			micro.InfoBar():Message("shinny: 搜索结果已更新")
+		end
 		return
 	end
 
@@ -1021,6 +1056,248 @@ local function finish_search(ctx, output)
 	micro.InfoBar():Message(string.format("shinny: %s · %d result(s)", ctx.backend, count))
 end
 
+local function render_research(ctx)
+	local r = ctx.research
+	local out = {}
+	local function add(line)
+		out[#out + 1] = line
+	end
+	add("shinny · " .. collapse(ctx.full))
+	add(string.format(
+		"Tavily Research · %s · %s · %s",
+		tostr(ctx.opts.research_model), tostr(ctx.opts.cost), r.finished and "完成" or "进行中"
+	))
+	add(string.format(
+		"前缀「%s」 · 后缀「%s」",
+		ctx.prefix == "" and "无" or ctx.prefix,
+		ctx.suffix == "" and "无" or ctx.suffix
+	))
+	add("")
+	if #r.progress > 0 then
+		add("Research progress")
+		for _, line in ipairs(r.progress) do
+			add("  • " .. line)
+		end
+		add("")
+	end
+	add("报告")
+	if trim(r.content) == "" then
+		add(r.finished and "（研究没有返回正文）" or "研究进行中…")
+	else
+		add(r.content)
+	end
+	if #r.sources > 0 then
+		add("")
+		add("Sources")
+		for i, src in ipairs(r.sources) do
+			add(string.format("%d. %s", i, src.title ~= "" and src.title or "(untitled)"))
+			if src.url ~= "" then
+				add("   " .. src.url)
+			end
+		end
+	end
+	return table.concat(out, "\n")
+end
+
+local function add_research_sources(ctx, list)
+	if type(list) ~= "table" then
+		return false
+	end
+	local changed = false
+	for _, src in ipairs(list) do
+		local url = ""
+		local title = ""
+		if type(src) == "table" then
+			url = tostr(src.url or "")
+			title = tostr(src.title or "")
+		elseif type(src) == "string" then
+			url = src
+		end
+		if url ~= "" and ctx.research.seen_sources[url] == nil then
+			ctx.research.seen_sources[url] = true
+			ctx.research.sources[#ctx.research.sources + 1] = { url = url, title = title }
+			changed = true
+		end
+	end
+	return changed
+end
+
+local function add_research_progress(ctx, line)
+	line = trim(line)
+	if line == "" or ctx.research.seen_progress[line] ~= nil then
+		return false
+	end
+	ctx.research.seen_progress[line] = true
+	ctx.research.progress[#ctx.research.progress + 1] = line
+	return true
+end
+
+local function finish_research(ctx)
+	local r = ctx.research
+	if r == nil or r.finished then
+		return
+	end
+	r.finished = true
+	local text = render_research(ctx)
+	last_search_text = text
+	last_search_query = ctx.full
+	show_results(ctx, text, true)
+	local job = ctx.job
+	ctx.job = nil
+	os.Setenv("SHINNY_KEY", "")
+	os.Setenv("SHINNY_BODY", "")
+	if job ~= nil then
+		pcall(shell.JobStop, job)
+	end
+	micro.InfoBar():Message("shinny: research 完成 · " .. tostr(ctx.opts.cost))
+end
+
+local function handle_research_chunk(ctx, chunk)
+	local r = ctx.research
+	if r == nil or r.finished then
+		return
+	end
+	r.sbuf = (r.sbuf or "") .. tostr(chunk)
+	local changed = false
+	while true do
+		local idx = r.sbuf:find("\n")
+		if idx == nil then
+			break
+		end
+		local line = r.sbuf:sub(1, idx - 1):gsub("\r$", "")
+		r.sbuf = r.sbuf:sub(idx + 1)
+		if line:sub(1, 6) == "event:" then
+			if trim(line:sub(7)) == "done" then
+				finish_research(ctx)
+				return
+			end
+		elseif line:sub(1, 5) == "data:" then
+			local payload = trim(line:sub(6))
+			if payload == "[DONE]" or payload == "done" then
+				finish_research(ctx)
+				return
+			end
+			local ok, data = pcall(json_decode, payload)
+			if ok and type(data) == "table" and type(data.choices) == "table" then
+				local choice = data.choices[1]
+				local delta = choice and choice.delta
+				if type(delta) == "table" then
+					if type(delta.content) == "string" and delta.content ~= "" then
+						r.content = r.content .. delta.content
+						changed = true
+					end
+					if add_research_sources(ctx, delta.sources) then
+						changed = true
+					end
+					local tc = delta.tool_calls
+					if type(tc) == "table" then
+						local calls = tc.tool_call or tc
+						if type(calls) == "table" then
+							for _, call in ipairs(calls) do
+								if type(call) == "table" then
+									local name = tostr(call.name or tc.type or "tool")
+									local args = tostr(call.arguments or "")
+									local queries = ""
+									if type(call.queries) == "table" then
+										queries = table.concat(call.queries, " / ")
+									end
+									local line2 = name
+									if queries ~= "" then
+										line2 = line2 .. ": " .. queries
+									elseif args ~= "" then
+										line2 = line2 .. ": " .. args
+									end
+									if add_research_progress(ctx, line2) then
+										changed = true
+									end
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	if changed and not r.finished then
+		if #r.content - (r.last_render_len or 0) >= 300 then
+			r.last_render_len = #r.content
+			show_results(ctx, render_research(ctx), false)
+		elseif r.sources and #r.sources > (r.last_render_sources or 0) then
+			r.last_render_sources = #r.sources
+			show_results(ctx, render_research(ctx), false)
+		elseif #r.progress > (r.last_render_progress or 0) then
+			r.last_render_progress = #r.progress
+			show_results(ctx, render_research(ctx), false)
+		end
+	end
+end
+
+local function start_research(ctx, key)
+	ctx.opts = search_options()
+	ctx.mode = ctx.opts.mode
+	ctx.research = {
+		content = "",
+		sources = {},
+		seen_sources = {},
+		progress = {},
+		seen_progress = {},
+		sbuf = "",
+		finished = false,
+		last_render_len = 0,
+		last_render_sources = 0,
+		last_render_progress = 0,
+	}
+	ctx.endpoint = trim(tostr(option("researchurl", DEFAULT_RESEARCH_URL)))
+	if ctx.endpoint == "" then
+		ctx.endpoint = DEFAULT_RESEARCH_URL
+	end
+	local input = clamp(ctx.full, 4000)
+	ctx.body = string.format(
+		'{"input":"%s","model":"%s","stream":true}',
+		json_escape(input),
+		json_escape(tostr(ctx.opts.research_model or "mini"))
+	)
+	last_query = ctx.full
+	last_response = ""
+	show_results(ctx, render_research(ctx), true)
+	micro.InfoBar():Message(string.format(
+		"shinny: Tavily Research %s · 预计 %s · Esc 不可中断",
+		tostr(ctx.opts.research_model), tostr(ctx.opts.cost)
+	))
+
+	os.Setenv("SHINNY_ENDPOINT", ctx.endpoint)
+	os.Setenv("SHINNY_KEY", key)
+	os.Setenv("SHINNY_BODY", ctx.body)
+
+	local ok, job = pcall(shell.JobStart, RESEARCH_CMD, function(chunk)
+		handle_research_chunk(ctx, chunk)
+	end, nil, function(output)
+		os.Setenv("SHINNY_KEY", "")
+		os.Setenv("SHINNY_BODY", "")
+		local status, payload = split_output(output)
+		last_response = payload
+		ctx.job = nil
+		if ctx.research ~= nil and not ctx.research.finished then
+			if status == nil or status < 200 or status >= 300 then
+				local detail = error_detail(payload)
+				if detail == "" then
+					detail = status ~= nil and ("HTTP " .. tostr(status)) or "research 没有返回内容"
+				end
+				micro.InfoBar():Error("shinny: " .. shorten(detail, 160))
+				return
+			end
+			finish_research(ctx)
+		end
+	end)
+	if not ok then
+		os.Setenv("SHINNY_KEY", "")
+		os.Setenv("SHINNY_BODY", "")
+		micro.InfoBar():Error("shinny: " .. shorten(collapse(tostr(job)), 160))
+		return
+	end
+	ctx.job = job
+end
+
 local function start_search(base)
 	local backend_name = current_backend()
 	local key = api_key(backend_name)
@@ -1030,6 +1307,23 @@ local function start_search(base)
 		else
 			micro.InfoBar():Error("shinny: 没有 Tavily key — 运行 > set shinny.apikey <key>")
 		end
+		return
+	end
+
+	local opts = search_options()
+	if opts.kind == "research" then
+		if backend_name ~= "tavily" then
+			micro.InfoBar():Error("shinny: Research 只用 Tavily 后端 — > shinny-backend tavily")
+			return
+		end
+		local ctx = {
+			base = base,
+			prefix = current_prefix(),
+			suffix = current_suffix(),
+			backend = backend_name,
+		}
+		ctx.full = ctx.prefix .. base .. ctx.suffix
+		start_research(ctx, key)
 		return
 	end
 
@@ -3080,6 +3374,7 @@ local function render_help()
 	add("- `shinny-prefix [text]` — 查看/设置前缀（`-` 清除）")
 	add("- `shinny-suffix [text]` — 查看/设置后缀（`-` 清除）")
 	add("- `shinny-backend [tavily|deepseek]` — 查看/切换搜索后端")
+	add("- `shinny-mode [quick|ultra|simple|deep|research-mini|research-pro]` — 搜索/研究模式与花费")
 	add("- `shinny-chat` — 打开当前文件的 chat，等同 `Alt-i`")
 	add("- `shinny-model [name]` — 查看/切换模型")
 	add("- `shinny-thinking [on|off]` — 查看/切换思考模式")
@@ -3101,6 +3396,8 @@ local function render_help()
 	add("- 前缀：`" .. (prefix == "" and "无" or prefix) .. "`")
 	add("- 后缀：`" .. (suffix == "" and "无" or suffix) .. "`")
 	add("- 搜索后端：`" .. current_backend() .. "`")
+	local smode, sinfo = current_search_mode()
+	add("- 搜索模式：`" .. smode .. "` · " .. sinfo.label .. " · " .. sinfo.cost)
 	add("- Chat 模型：`" .. settings.model .. "`")
 	add("- 思考模式：`" .. (settings.thinking and ("on · " .. settings.effort) or "off") .. "`")
 	add("- Tavily key：" .. (api_key("tavily") ~= "" and "已配置" or "未配置"))
@@ -3182,6 +3479,33 @@ end
 
 function shinny_suffix(bp, args)
 	setting_command("suffix", "后缀", args)
+end
+
+function shinny_mode(bp, args)
+	local value = trim(join_args(args)):lower()
+	local mode, info = current_search_mode()
+	if value == "" or value == "list" or value == "ls" then
+		local names = {}
+		for name in pairs(SEARCH_MODES) do
+			names[#names + 1] = name
+		end
+		table.sort(names)
+		micro.InfoBar():Message(string.format(
+			"shinny: mode = %s · %s · %s（%s）",
+			mode, info.label, info.cost, table.concat(names, " | ")
+		))
+		return
+	end
+	if SEARCH_MODES[value] == nil then
+		micro.InfoBar():Error("shinny: mode 只能是 quick | ultra | simple | deep | research-mini | research-pro")
+		return
+	end
+	set_setting("searchmode", value)
+	local chosen = SEARCH_MODES[value]
+	micro.InfoBar():Message(string.format(
+		"shinny: mode = %s · %s · %s",
+		value, chosen.label, chosen.cost
+	))
 end
 
 function shinny_backend(bp, args)
@@ -3738,6 +4062,8 @@ function init()
 	config.RegisterGlobalOption("shinny", "prefix", DEFAULT_PREFIX)
 	config.RegisterGlobalOption("shinny", "suffix", "")
 	config.RegisterGlobalOption("shinny", "backend", "tavily")
+	config.RegisterGlobalOption("shinny", "searchmode", DEFAULT_SEARCH_MODE)
+	config.RegisterGlobalOption("shinny", "researchurl", DEFAULT_RESEARCH_URL)
 	config.RegisterGlobalOption("shinny", "maxresults", 5)
 	config.RegisterGlobalOption("shinny", "depth", "basic")
 	config.RegisterGlobalOption("shinny", "includeanswer", true)
@@ -3767,6 +4093,7 @@ function init()
 	config.MakeCommand("shinny-prefix", shinny_prefix, config.NoComplete)
 	config.MakeCommand("shinny-suffix", shinny_suffix, config.NoComplete)
 	config.MakeCommand("shinny-backend", shinny_backend, config.NoComplete)
+	config.MakeCommand("shinny-mode", shinny_mode, config.NoComplete)
 	config.MakeCommand("shinny-chat", shinny_chat, config.NoComplete)
 	config.MakeCommand("shinny-help", shinny_help, config.NoComplete)
 	config.MakeCommand("shinny-chat-new", shinny_chat_new, config.NoComplete)

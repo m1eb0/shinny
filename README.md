@@ -53,9 +53,24 @@ make link          # 软链到 ~/.config/micro/plug/shinny
 > shinny-suffix 是什么        # 查看/设置后缀
 > shinny-backend deepseek     # 切换到 DeepSeek Search
 > shinny-backend tavily       # 切回 Tavily
+> shinny-mode quick           # 选择 Tavily 搜索/研究模式
+> shinny-mode                 # 查看当前模式和花费
 ```
 
-前缀/后缀/后端会保存到 `~/.config/micro/shinny.json`，重启后仍然生效。每次搜索时，信息栏和结果头部都会显示当前的前缀与后缀。
+Tavily 模式（花费按 Tavily 官方 credit 计）：
+
+| 模式 | 行为 | 花费 |
+| --- | --- | --- |
+| `quick` | `fast` 搜索，不要 answer | 1 credit |
+| `ultra` | `ultra-fast` 搜索，最低延迟 | 1 credit |
+| `simple` | `basic` 搜索 + answer（默认） | 1 credit |
+| `deep` | `advanced` 搜索 + answer，多片段 | 2 credits |
+| `research-mini` | Tavily Research，mini 报告 | 4–110 credits |
+| `research-pro` | Tavily Research，pro 深度报告 | 15–250 credits |
+
+Research 会在结果 tab 里实时显示进度、来源和最终报告；研究请求可能持续几分钟。这些模式只对 Tavily 生效；DeepSeek 搜索仍使用它的 `count` 参数。
+
+前缀/后缀/后端/模式会保存到 `~/.config/micro/shinny.json`，重启后仍然生效。每次搜索时，信息栏和结果头部都会显示当前的前缀与后缀。
 
 DeepSeek 搜索走官方 `POST /v1/tools/search`，需要 DeepSeek key；两个后端都支持分页数量、结果标题/URL/摘要/评分。
 
@@ -142,6 +157,7 @@ micro 本身只做 Markdown 语法高亮，不渲染排版。编辑文件时按 
 | `shinny-prefix [text]` | 查看/设置前缀 |
 | `shinny-suffix [text]` | 查看/设置后缀 |
 | `shinny-backend [tavily\|deepseek]` | 查看/切换搜索后端 |
+| `shinny-mode [quick\|ultra\|simple\|deep\|research-mini\|research-pro]` | 查看/切换搜索模式 |
 | `shinny-chat` | 打开当前文件的 chat，等同于 `Alt-i` |
 | `shinny-model [name]` | 查看/切换模型 |
 | `shinny-thinking [on\|off]` | 查看/切换思考模式 |
@@ -164,7 +180,8 @@ micro 本身只做 Markdown 语法高亮，不渲染排版。编辑文件时按 
 | `shinny.prefix` / `shinny.suffix` | `什么是` / 空 |
 | `shinny.backend` | `tavily` |
 | `shinny.maxresults` | `5` |
-| `shinny.depth` / `shinny.includeanswer` | `basic` / `true` |
+| `shinny.searchmode` | `simple` |
+| `shinny.researchurl` | Tavily Research 地址 |
 | `shinny.chatmodel` | `deepseek-flash` |
 | `shinny.thinking` / `shinny.effort` | `true` / `high` |
 | `shinny.chattokenbudget` | `24000` |

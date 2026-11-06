@@ -16,6 +16,20 @@
 
 不带参数时只显示当前值。
 
+### 搜索模式
+
+Tavily 支持不同花费和结果的模式，用 `shinny-mode` 切换：
+
+    > shinny-mode quick           fast，1 credit
+    > shinny-mode ultra           ultra-fast，1 credit
+    > shinny-mode simple          basic + answer，1 credit（默认）
+    > shinny-mode deep            advanced + answer，2 credits
+    > shinny-mode research-mini   Research mini，4–110 credits
+    > shinny-mode research-pro    Research pro，15–250 credits
+    > shinny-mode                 查看当前模式
+
+Research 会在搜索结果 tab 里流式显示进度、来源和报告。模式只对 Tavily 生效。
+
 ### 切换搜索后端
 
     > shinny-backend deepseek
@@ -108,6 +122,7 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny-prefix [text]` | 查看/设置搜索前缀（`-` 清除） |
 | `shinny-suffix [text]` | 查看/设置搜索后缀（`-` 清除） |
 | `shinny-backend [tavily\|deepseek]` | 查看/切换搜索后端 |
+| `shinny-mode [quick\|ultra\|simple\|deep\|research-mini\|research-pro]` | 查看/切换搜索模式 |
 | `shinny-chat` | 打开当前文件的 chat 分屏 |
 | `shinny-model [name]` | 查看/切换 chat 模型（`deepseek-flash`、`deepseek-v4-pro`） |
 | `shinny-thinking [on\|off]` | 查看/切换思考模式 |
@@ -135,8 +150,8 @@ Chat 使用 DeepSeek Chat API，与搜索共用同一个 key。默认模型是 `
 | `shinny.prefix` / `shinny.suffix` | `什么是` / 空 | 搜索前后缀 |
 | `shinny.backend` | `tavily` | `tavily` 或 `deepseek` |
 | `shinny.maxresults` | `5` | 结果数量（Tavily ≤20，DeepSeek ≤50） |
-| `shinny.depth` | `basic` | Tavily 搜索深度 |
-| `shinny.includeanswer` | `true` | Tavily 是否附带 answer |
+| `shinny.searchmode` | `simple` | Tavily 搜索/研究模式 |
+| `shinny.researchurl` | Tavily Research 地址 | 自定义 Research 端点 |
 | `shinny.endpoint` | Tavily 地址 | 自定义 Tavily 端点 |
 | `shinny.deepseektoolsurl` | DeepSeek Search 地址 | 自定义 DeepSeek 搜索端点 |
 | `shinny.chaturl` | DeepSeek Chat 地址 | 自定义 chat 端点 |

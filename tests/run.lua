@@ -356,6 +356,8 @@ packages["micro/shell"] = function()
 			if tostring(state.env.SHINNY_ENDPOINT):find("chat", 1, true) then
 				state.job_kind = "chat"
 				state.chat_bodies[#state.chat_bodies + 1] = body
+			elseif tostring(state.env.SHINNY_ENDPOINT):find("research", 1, true) then
+				state.job_kind = "research"
 			end
 			state.pending = function()
 				if state.real then
@@ -372,6 +374,12 @@ packages["micro/shell"] = function()
 						on_stdout(line)
 					end
 					on_exit(sse .. "\n__SHINNY_STATUS__:200")
+				elseif state.job_kind == "research" then
+					local sse = state.research_stdout or ""
+					for line in (sse .. "\n"):gmatch("(.-\n)") do
+						on_stdout(line)
+					end
+					on_exit(sse .. "\n__SHINNY_STATUS__:" .. tostring(state.research_status or 200))
 				else
 					on_exit(state.search_output)
 				end
@@ -694,6 +702,43 @@ test("shinny-prefix persists and changes later searches", function()
 	state.search_output = SAMPLE
 	run(shinny, bp, nil)
 	assert_contains(state.job_env.BODY, '"query":"请问NVME集群"')
+end)
+
+test("shinny-mode quick uses fast search and skips the answer", function()
+	local bp = setup_search("tavily")
+	state.commands["shinny-mode"](bp, { "quick" })
+	assert_true(state.options["shinny.searchmode"] == "quick", "mode option")
+	state.search_output = SAMPLE
+	run(shinny, bp, nil)
+	assert_contains(state.job_env.BODY, '"search_depth":"fast"')
+	assert_contains(state.job_env.BODY, '"include_answer":false')
+	assert_contains(state.panes[#state.panes].Buf:text(), "快速搜索")
+	state.options["shinny.searchmode"] = "simple"
+end)
+
+test("research mode streams a report and sources", function()
+	local bp = setup_search("tavily")
+	state.commands["shinny-mode"](bp, { "research-mini" })
+	state.research_stdout = table.concat({
+		'data: {"choices":[{"delta":{"tool_calls":{"type":"tool_call","tool_call":[{"name":"WebSearch","arguments":"searching","queries":["nvme"]}]}}}]}',
+		'',
+		'data: {"choices":[{"delta":{"content":"# Report\\n\\nNVMe research body."}}]}',
+		'',
+		'data: {"choices":[{"delta":{"sources":[{"url":"https://example.test/r","title":"Research source"}]}}]}',
+		'',
+		'event: done',
+		'',
+	}, "\n")
+	run(shinny, bp, nil)
+	assert_contains(state.job_env.ENDPOINT, "research")
+	assert_contains(state.job_env.BODY, '"model":"mini"')
+	assert_contains(state.job_env.BODY, '"stream":true')
+	local text = state.panes[#state.panes].Buf:text()
+	assert_contains(text, "Tavily Research · mini")
+	assert_contains(text, "NVMe research body")
+	assert_contains(text, "Research source")
+	assert_contains(text, "WebSearch")
+	state.options["shinny.searchmode"] = "simple"
 end)
 
 test("shinny-backend switches to DeepSeek search", function()
