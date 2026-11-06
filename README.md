@@ -130,6 +130,46 @@ micro 本身只做 Markdown 语法高亮，不渲染排版。编辑文件时按 
 
 单张默认上限 `shinny.imagemaxmb` = 12 MB；对话记录里会显示 `🖼` 缩略标记。图片只出现在 user 消息中（API 限制），每张按约 1024 tokens 计入预算。
 
+
+## 免费模型（Our Free Model）
+
+shinny 也可以不填 DeepSeek key，改走本地运行的 [Our Free Model](https://github.com/Ebony-Vinyl/dsh-our-free-model) 网关。网关对 shinny 暴露 OpenAI 兼容接口，模型清单和切换都是动态的。
+
+### 启动本地网关
+
+独立服务（不需要 DSH）：
+
+```sh
+cd ~/dsh-our-free-model
+OUR_FREE_MODEL_FREE_TRANSPORT=node node packages/standalone/cli.mjs --port 18900
+```
+
+默认数据目录 `~/.our-free-model`，API 为 `http://127.0.0.1:18900/v1`，Key 在 `~/.our-free-model/settings.json` 的 `forwardKey`。OpenCode 免费车道推荐装 Bun；只用 Kilo/NVIDIA 免费池时 `node` transport 也可用。
+
+也可以使用 DSH 插件版的本地转发（设置 → Our Free Model → 本地转发，默认 `18899`）。
+
+### 切换到免费模型
+
+```sh
+> shinny-provider free     # 切到免费网关（自动读取上面的 settings.json）
+> shinny-models            # 拉取 /v1/models，在新 tab 里显示 id / ctx / efforts
+> shinny-model kilo-auto/free
+> shinny-model next        # 在已拉取的清单里轮换
+> shinny-model prev
+> shinny-provider deepseek  # 切回 DeepSeek
+```
+
+如果网关不在默认端口，或 Key 不自动发现：
+
+```
+> set shinny.freeurl http://127.0.0.1:18900/v1
+> set shinny.freekekey ofm-...
+```
+
+`shinny.chatprovider`、`shinny.freemodel` 会持久化。免费模型使用网关自己的 `reasoning_effort` 档位：shinny 的 `low/high/max` 会映射到模型的 `light/balanced/deep`（或 `low/medium/high`），关闭 thinking 时优先发 `disabled`；具体可用档位见 `shinny-models`。请求不带 DeepSeek 的 `thinking` 字段。
+
+免费池的可用性取决于出口和上游配额，`/v1/models` 里同一批模型可能个别返回 429；换一个模型即可。
+
 ## 命令与选项
 
 | 命令 | 说明 |
@@ -162,6 +202,11 @@ micro 本身只做 Markdown 语法高亮，不渲染排版。编辑文件时按 
 | `shinny.maxresults` | `5` |
 | `shinny.depth` / `shinny.includeanswer` | `basic` / `true` |
 | `shinny.chatmodel` | `deepseek-flash` |
+| `shinny.chatprovider` | `deepseek` |
+| `shinny.freemodel` | `kilo-auto/free` |
+| `shinny.freeurl` | `""`（自动发现） |
+| `shinny.freekekey` | `""`（自动发现） |
+| `shinny.freemaxtokens` | `32768` |
 | `shinny.thinking` / `shinny.effort` | `true` / `high` |
 | `shinny.chattokenbudget` | `24000` |
 | `shinny.showthinking` | `false` |
@@ -188,7 +233,7 @@ chat 分屏、输入栏、搜索结果 tab 和帮助页都带语法高亮（角�
 ## 开发
 
 ```sh
-make test    # 35 个 headless 测试 + 2 个走本地 mock 的端到端测试
+make test    # 36 个 headless 测试 + 2 个走本地 mock 的端到端测试
 ```
 
 `tests/run.lua` 用假的 micro API 跑逻辑；`tests/integration.sh` 启动
