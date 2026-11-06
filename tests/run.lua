@@ -1124,6 +1124,13 @@ test("free provider sends model, budget and mapped effort", function()
 	state.options["shinny.effort"] = "high"
 end)
 
+test("shinny-provider updates the chat provider option", function()
+	local bp = setup_search("tavily")
+	state.options["shinny.chatprovider"] = "free"
+	state.commands["shinny-provider"](bp, { "deepseek" })
+	assert_true(state.options["shinny.chatprovider"] == "deepseek", "provider option not updated")
+end)
+
 test("chat persists the conversation to disk", function()
 	local bp = setup_search("tavily")
 	state.chat_sse = CHAT_TEXT

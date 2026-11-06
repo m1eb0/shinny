@@ -1,4 +1,4 @@
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -3290,7 +3290,7 @@ function shinny_provider(bp, args)
 			return
 		end
 	end
-	set_setting("provider", value)
+	set_setting("provider", value, "chatprovider")
 	if value == "free" then
 		fetch_free_models(bp, false)
 	end
