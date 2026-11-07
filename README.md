@@ -118,6 +118,7 @@ Chat 是流式的：回答边生成边显示，`Esc` 停止；思考内容单独
 
 - 首字超过 `shinny.firstbyttimeout`（默认 15 秒）没来，或 chunk 间隔超过 `shinny.stalltimeout`（默认 45 秒）且还没有正文 → 自动改用**非流式**重试一次
 - 正文已经出现后停顿，仍按 `shinny.streamtimeout`（默认 120 秒）保留部分内容并结束
+- 非流式重试受 `shinny.nonstreamtimeout`（默认 180 秒）约束，不会无限等待
 - 可用 `shinny.streamfallback` 关闭自动非流式重试`finish_reason=length` 或连接中途断开时，回答末尾会标注“回答可能不完整”。
 
 请求默认带 `max_tokens: 65536`（`shinny.maxtokens` 可调），避免非 thinking 模式默认 8K 输出上限把长回答截断。
@@ -197,6 +198,7 @@ micro 本身只做 Markdown 语法高亮，不渲染排版。编辑文件时按 
 | `shinny.streamfallback` | `true` |
 | `shinny.firstbyttimeout` | `15` |
 | `shinny.stalltimeout` | `45` |
+| `shinny.nonstreamtimeout` | `180` |
 
 | `shinny.endpoint` / `shinny.deepseektoolsurl` / `shinny.chaturl` | 官方地址 |
 

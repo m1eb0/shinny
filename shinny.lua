@@ -1,4 +1,4 @@
-VERSION = "0.8.5"
+VERSION = "0.8.6"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -2524,7 +2524,7 @@ function finalize_timeout(chat)
 		chat.body_path = nil
 	end
 	local partial = chat.stream and chat.stream.content or ""
-	local note = "（响应超时，已保留部分内容）"
+	local note = partial ~= "" and "（响应超时，已保留部分内容）" or "（响应超时，没有收到内容）"
 	local content = partial ~= "" and (partial .. "\n\n" .. note) or note
 	chat.messages[#chat.messages + 1] = {
 		role = "assistant",
@@ -2540,77 +2540,100 @@ end
 local function watch_chats()
 	TICK = TICK + 1
 	for _, chat in pairs(chats) do
-		if chat.streaming and chat.job ~= nil and not chat.nonstream then
-			local last = chat.last_activity or TICK
-			local idle = TICK - last
+		if chat.streaming and chat.job ~= nil then
 			local elapsed = TICK - (chat.started_tick or TICK)
-			if idle >= 2 then
-				local seconds = idle * 5
-				if chat.waiting_note ~= seconds then
+			if chat.nonstream then
+				local seconds = elapsed * 5
+				if seconds >= 10 and seconds % 10 == 0 and chat.waiting_note ~= seconds then
 					chat.waiting_note = seconds
-					micro.InfoBar():Message(string.format("shinny: 等待服务端… %ds（Esc 停止）", seconds))
-					net_append(chat, string.format("[net] waiting tick=%d seconds=%d chunks=%d\n", TICK, seconds, chat.net_chunks or 0))
-					net_write(chat)
+					micro.InfoBar():Message(string.format("shinny: 非流式生成中… %ds（Esc 停止）", seconds))
+					if chat.net_parts ~= nil then
+						net_append(chat, string.format("[net] nonstream waiting tick=%d seconds=%d\n", TICK, seconds))
+						net_write(chat)
+					end
 				end
-			end
-
-			local content = chat.stream and chat.stream.content or ""
-			local tools = chat.stream and chat.stream.tools or {}
-			local no_output = content == "" and #tools == 0
-			local first_limit = math.max(1, math.floor(option_number("firstbyttimeout", 15) / 5))
-			local stall_limit = math.max(2, math.floor(option_number("stalltimeout", 45) / 5))
-			local should_fallback = option_bool("streamfallback", true)
-				and not chat.fallback_attempted
-				and no_output
-				and ((not chat.received_chunk and elapsed >= first_limit) or (chat.received_chunk and idle >= stall_limit))
-
-			if should_fallback then
-				chat.fallback_attempted = true
-				local job = chat.job
-				chat.job = nil
-				chat.streaming = false
-				if job ~= nil then
-					pcall(shell.JobStop, job)
-				end
-				if chat.body_path ~= nil then
-					pcall(os.Remove, chat.body_path)
-					chat.body_path = nil
-				end
-				if chat.log_parts ~= nil then
-					log_append(chat, string.format(
-						"\n=== fallback nonstream ===\ntick=%d reason=stall content=%d reasoning=%d\n",
-						TICK, #content, #(chat.stream.reasoning or "")
-					))
-					log_flush(chat)
-				end
-				if chat.net_parts ~= nil then
-					net_append(chat, string.format("[net] fallback nonstream tick=%d idle=%ds\n", TICK, idle * 5))
-					net_flush(chat)
-				end
-				micro.InfoBar():Message("shinny: 流式未继续，改用非流式重试…")
-				start_nonstream_request(chat)
-			else
-				local limit = math.max(2, math.floor(option_number("streamtimeout", 120) / 5))
-				if idle >= limit then
+				local nonstream_limit = math.max(2, math.floor(option_number("nonstreamtimeout", 180) / 5))
+				if elapsed >= nonstream_limit then
 					chat.timeout = true
 					local job = chat.job
 					chat.job = nil
+					chat.streaming = false
+					chat.nonstream = false
 					if job ~= nil then
 						pcall(shell.JobStop, job)
 					end
-					micro.After(0, function()
-						if chat.streaming then
-							chat.streaming = false
-							finalize_timeout(chat)
+					finalize_timeout(chat)
+				end
+			else
+				local last = chat.last_activity or TICK
+				local idle = TICK - last
+				if idle >= 2 then
+					local seconds = idle * 5
+					if chat.waiting_note ~= seconds then
+						chat.waiting_note = seconds
+						micro.InfoBar():Message(string.format("shinny: 等待服务端… %ds（Esc 停止）", seconds))
+						net_append(chat, string.format("[net] waiting tick=%d seconds=%d chunks=%d\n", TICK, seconds, chat.net_chunks or 0))
+						net_write(chat)
+					end
+				end
+
+				local content = chat.stream and chat.stream.content or ""
+				local tools = chat.stream and chat.stream.tools or {}
+				local no_output = content == "" and #tools == 0
+				local first_limit = math.max(1, math.floor(option_number("firstbyttimeout", 15) / 5))
+				local stall_limit = math.max(2, math.floor(option_number("stalltimeout", 45) / 5))
+				local should_fallback = option_bool("streamfallback", true)
+					and not chat.fallback_attempted
+					and no_output
+					and ((not chat.received_chunk and elapsed >= first_limit) or (chat.received_chunk and idle >= stall_limit))
+
+				if should_fallback then
+					chat.fallback_attempted = true
+					local job = chat.job
+					chat.job = nil
+					chat.streaming = false
+					if job ~= nil then
+						pcall(shell.JobStop, job)
+					end
+					if chat.body_path ~= nil then
+						pcall(os.Remove, chat.body_path)
+						chat.body_path = nil
+					end
+					if chat.log_parts ~= nil then
+						log_append(chat, string.format(
+							"\n=== fallback nonstream ===\ntick=%d reason=stall content=%d reasoning=%d\n",
+							TICK, #content, #(chat.stream.reasoning or "")
+						))
+						log_flush(chat)
+					end
+					if chat.net_parts ~= nil then
+						net_append(chat, string.format("[net] fallback nonstream tick=%d idle=%ds\n", TICK, idle * 5))
+						net_flush(chat)
+					end
+					micro.InfoBar():Message("shinny: 流式未继续，改用非流式重试…")
+					start_nonstream_request(chat)
+				else
+					local limit = math.max(2, math.floor(option_number("streamtimeout", 120) / 5))
+					if idle >= limit then
+						chat.timeout = true
+						local job = chat.job
+						chat.job = nil
+						if job ~= nil then
+							pcall(shell.JobStop, job)
 						end
-					end)
+						micro.After(0, function()
+							if chat.streaming then
+								chat.streaming = false
+								finalize_timeout(chat)
+							end
+						end)
+					end
 				end
 			end
 		end
 	end
 	micro.After(5000000000, watch_chats)
 end
-
 function finalize_cancel(chat)
 	if chat.net_parts ~= nil then
 		net_append(chat, string.format("[net] canceled tick=%d chunks=%d\n", TICK, chat.net_chunks or 0))
@@ -4218,6 +4241,7 @@ function init()
 	config.RegisterGlobalOption("shinny", "streamfallback", true)
 	config.RegisterGlobalOption("shinny", "firstbyttimeout", 15)
 	config.RegisterGlobalOption("shinny", "stalltimeout", 45)
+	config.RegisterGlobalOption("shinny", "nonstreamtimeout", 180)
 	config.RegisterGlobalOption("shinny", "chattokenbudget", 24000)
 	config.RegisterGlobalOption("shinny", "showthinking", false)
 	config.RegisterGlobalOption("shinny", "imagedetail", "auto")
