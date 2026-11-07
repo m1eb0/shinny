@@ -1,4 +1,4 @@
-VERSION = "0.8.4"
+VERSION = "0.8.5"
 
 -- shinny: web search (Tavily or DeepSeek) for the selection, plus a per-file
 -- LLM chat that can edit the buffer you are working in.
@@ -1330,7 +1330,10 @@ local function start_research(ctx, key)
 	os.Setenv("SHINNY_BODY", ctx.body)
 
 	local ok, job = pcall(shell.JobStart, RESEARCH_CMD, function(chunk)
-		handle_research_chunk(ctx, chunk)
+		local chunk_ok, chunk_err = pcall(handle_research_chunk, ctx, chunk)
+		if not chunk_ok then
+			micro.InfoBar():Error("shinny: research 处理错误 — " .. shorten(collapse(tostr(chunk_err)), 140))
+		end
 	end, nil, function(output)
 		os.Setenv("SHINNY_KEY", "")
 		os.Setenv("SHINNY_BODY", "")
@@ -1602,6 +1605,16 @@ local function chat_dir()
 	return config.ConfigDir .. "/shinny/chats"
 end
 
+local function append_piece(parts, text)
+	text = tostr(text)
+	local last = parts[#parts]
+	if last ~= nil and #last < 8192 then
+		parts[#parts] = last .. text
+	else
+		parts[#parts + 1] = text
+	end
+end
+
 local function log_append(chat, text)
 	if chat == nil or chat.log_parts == nil then
 		return
@@ -1610,12 +1623,12 @@ local function log_append(chat, text)
 	if chat.log_size + #text > LOG_LIMIT then
 		if not chat.log_truncated then
 			chat.log_truncated = true
-			chat.log_parts[#chat.log_parts + 1] = "\n[log truncated]\n"
+			append_piece(chat.log_parts, "\n[log truncated]\n")
 			chat.log_size = chat.log_size + 17
 		end
 		return
 	end
-	chat.log_parts[#chat.log_parts + 1] = text
+	append_piece(chat.log_parts, text)
 	chat.log_size = chat.log_size + #text
 end
 
@@ -1631,7 +1644,7 @@ local function net_append(chat, text)
 	if chat.net_size + #text > 200000 then
 		return
 	end
-	chat.net_parts[#chat.net_parts + 1] = text
+	append_piece(chat.net_parts, text)
 	chat.net_size = chat.net_size + #text
 end
 
@@ -1639,7 +1652,10 @@ local function net_write(chat)
 	if chat == nil or chat.net_parts == nil then
 		return
 	end
-	local text = table.concat(chat.net_parts)
+	local concat_ok, text = pcall(table.concat, chat.net_parts)
+	if not concat_ok then
+		text = "[network log flush failed: " .. tostr(text) .. "]\n"
+	end
 	local dir = log_dir()
 	pcall(os.MkdirAll, dir, 448)
 	local path = dir .. "/last-network.log"
@@ -1661,7 +1677,10 @@ local function log_flush(chat)
 	if chat == nil or chat.log_parts == nil then
 		return
 	end
-	local text = table.concat(chat.log_parts)
+	local concat_ok, text = pcall(table.concat, chat.log_parts)
+	if not concat_ok then
+		text = "[stream log flush failed: " .. tostr(text) .. "]\n"
+	end
 	chat.log_parts = nil
 	chat.log_size = 0
 	local dir = log_dir()
@@ -2374,13 +2393,20 @@ function start_request(chat)
 
 	local ok, job = pcall(shell.JobStart, STREAM_CMD, function(chunk)
 		if chat.req_seq == req then
-			handle_stream_chunk(chat, chunk)
+			local chunk_ok, chunk_err = pcall(handle_stream_chunk, chat, chunk)
+			if not chunk_ok then
+				micro.InfoBar():Error("shinny: 流处理错误 — " .. shorten(collapse(tostr(chunk_err)), 140))
+			end
 		end
 	end, nil, function(output)
 		os.Setenv("SHINNY_KEY", "")
 		os.Setenv("SHINNY_BODY", "")
 		if chat.req_seq == req then
-			handle_stream_exit(chat, output)
+			local exit_ok, exit_err = pcall(handle_stream_exit, chat, output)
+			if not exit_ok then
+				chat.streaming = false
+				micro.InfoBar():Error("shinny: 收尾错误 — " .. shorten(collapse(tostr(exit_err)), 140))
+			end
 		end
 	end)
 
@@ -2843,7 +2869,12 @@ function start_nonstream_request(chat)
 		os.Setenv("SHINNY_KEY", "")
 		os.Setenv("SHINNY_BODY", "")
 		if chat.req_seq == req then
-			handle_nonstream_exit(chat, output)
+			local exit_ok, exit_err = pcall(handle_nonstream_exit, chat, output)
+			if not exit_ok then
+				chat.streaming = false
+				chat.nonstream = false
+				micro.InfoBar():Error("shinny: 非流式收尾错误 — " .. shorten(collapse(tostr(exit_err)), 140))
+			end
 		end
 	end)
 	if not ok then
